@@ -45,8 +45,9 @@ Enter alone only runs what is in the line.
 
 Quoted text and escaped spaces stay one chunk. If the cursor sits
 mid-word, chunk accept completes that word first. Acceptance only
-edits the line; it never runs it. Only `Ctrl-X A` replaces the line
-outside the ghost-text flow, and it never runs it.
+edits the line; it never runs it. Accepting a preview drops the
+Awpfel gray; accepted text keeps normal shell colors. Only `Ctrl-X A`
+replaces the line outside the ghost-text flow, and it never runs it.
 
 ## Natural language
 

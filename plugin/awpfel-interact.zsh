@@ -20,6 +20,8 @@
 _awpfel_accept_full() {
     local full="$_AWPFEL_SUGGESTION"
     [[ -n "$full" ]] || return 0
+    local had_multiline=0
+    [[ "${POSTDISPLAY:-}" == *$'\n'* ]] && had_multiline=1
     _awpfel_cancel_pending_ai
     _awpfel_hl_clear
     BUFFER="$full"
@@ -27,9 +29,14 @@ _awpfel_accept_full() {
     _awpfel_line_note_own_edit
     _AWPFEL_SUGGESTION=""
     POSTDISPLAY=""
+    if (( had_multiline )); then
+        # Full redraw FIRST: _suggest_local below can `zle -M` (hint) and
+        # `zle -R`; reset flag must be set so those flush full, not incremental.
+        zle .redisplay
+    fi
     _awpfel_clear_hint
-    zle -R
     _awpfel_suggest_local
+    zle -R
 }
 
 _awpfel_accept() {
@@ -98,6 +105,8 @@ _awpfel_accept_chunk() {
     local full="$_AWPFEL_SUGGESTION"
     local input="$BUFFER"
     [[ -n "$full" ]] || return 0
+    local had_multiline=0
+    [[ "${POSTDISPLAY:-}" == *$'\n'* ]] && had_multiline=1
     _awpfel_cancel_pending_ai
     # Re-stage the accepted full command (cancel clears the slot), so
     # later chunks and Tab keep working off the same ghost.
@@ -122,6 +131,9 @@ _awpfel_accept_chunk() {
         _awpfel_hl_clear
     else
         _awpfel_render_ghost "$full"
+    fi
+    if (( had_multiline )); then
+        zle .redisplay
     fi
     zle -R
 }

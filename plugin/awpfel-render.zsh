@@ -89,8 +89,10 @@ _awpfel_render_ghost() {
         if (( ${#shown} > max )); then
             shown="${shown[1,$max]}…"
         fi
-        POSTDISPLAY=$'\n'"  → ${shown}"
-        _awpfel_hl_add "$(( $#BUFFER + 1 )) $(( $#BUFFER + 4 )) fg=240"
-        _awpfel_hl_add "$(( $#BUFFER + 4 )) $(( $#BUFFER + 4 + ${#shown} )) $_AWPFEL_GHOST_STYLE"
+        local prefix=$'\n  → '
+        local command_start=$(( ${#BUFFER} + ${#prefix} ))
+        POSTDISPLAY="$prefix$shown"
+        _awpfel_hl_add "$(( $#BUFFER + 1 )) $command_start fg=240"
+        _awpfel_hl_add "$command_start $(( command_start + ${#shown} )) $_AWPFEL_GHOST_STYLE"
     fi
 }

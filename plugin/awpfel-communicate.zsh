@@ -375,11 +375,16 @@ _awpfel_check_ai_result() {
             local nl_cmd_apply
             nl_cmd_apply=$(_awpfel_extract_nl_command "$response")
             [[ -n "$nl_cmd_apply" ]] || return 0
+            local had_multiline=0
+            [[ "${POSTDISPLAY:-}" == *$'\n'* ]] && had_multiline=1
             _awpfel_clear_ghost
-            _awpfel_clear_hint
             BUFFER="$nl_cmd_apply"
             CURSOR=${#BUFFER}
             _awpfel_line_note_own_edit
+            if (( had_multiline )); then
+                zle .redisplay 2>/dev/null
+            fi
+            _awpfel_clear_hint
             zle -R 2>/dev/null
             ;;
     esac

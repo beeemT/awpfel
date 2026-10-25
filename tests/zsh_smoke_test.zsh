@@ -176,6 +176,26 @@ if [[ "$POSTDISPLAY" == "gco"* ]]; then
 else
     pass
 fi
+# Ghost body highlight covers the whole shown command, first through
+# last glyph; exclusive end matches the actual POSTDISPLAY length.
+_ghost_body=""
+for _hl_entry in "${region_highlight[@]}"; do
+    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
+        _ghost_body="$_hl_entry"
+    fi
+done
+assert_contains "nonprefix: ghost body highlight present" "$_ghost_body" "$_AWPFEL_GHOST_STYLE"
+_np_shown="${POSTDISPLAY#*→ }"
+_np_prefix_len=$(( ${#POSTDISPLAY} - ${#_np_shown} ))
+_np_exp_start=$(( ${#BUFFER} + _np_prefix_len ))
+_np_exp_end=$(( _np_exp_start + ${#_np_shown} ))
+_np_gb_start="${_ghost_body%% *}"
+_np_gb_rest="${_ghost_body#* }"
+_np_gb_end="${_np_gb_rest%% *}"
+assert_eq "nonprefix: ghost body starts at command text" "$_np_exp_start" "$_np_gb_start"
+assert_eq "nonprefix: ghost body ends at preview end" "$_np_exp_end" "$_np_gb_end"
+assert_eq "nonprefix: ghost body covers shown text" "${#_np_shown}" "$(( _np_gb_end - _np_gb_start ))"
+
 
 reset_harness
 BUFFER="gco"
@@ -388,6 +408,32 @@ _resp='{"type":"suggest","suggestions":[{"text":"git checkout main"}],"need_ai":
 _awpfel_apply_suggest_response "$_resp"
 assert_eq "apply nonprefix: keeps full command" "git checkout main" "$_AWPFEL_SUGGESTION"
 assert_contains "apply nonprefix: visible preview" "$POSTDISPLAY" "git checkout main"
+# Truncation ellipsis is the last glyph and stays inside the ghost
+# body highlight; exclusive end matches the actual POSTDISPLAY.
+COLUMNS=20
+reset_harness
+BUFFER="gco"
+CURSOR=${#BUFFER}
+_long_cmd="git checkout some-very-long-branch-name-that-overflows"
+_awpfel_render_ghost "$_long_cmd"
+assert_contains "truncated: ellipsis shown" "$POSTDISPLAY" "…"
+_tr_ghost_body=""
+for _hl_entry in "${region_highlight[@]}"; do
+    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
+        _tr_ghost_body="$_hl_entry"
+    fi
+done
+_tr_shown="${POSTDISPLAY#*→ }"
+_tr_prefix_len=$(( ${#POSTDISPLAY} - ${#_tr_shown} ))
+_tr_exp_start=$(( ${#BUFFER} + _tr_prefix_len ))
+_tr_exp_end=$(( _tr_exp_start + ${#_tr_shown} ))
+_tr_gb_start="${_tr_ghost_body%% *}"
+_tr_gb_rest="${_tr_ghost_body#* }"
+_tr_gb_end="${_tr_gb_rest%% *}"
+assert_eq "truncated: body covers ellipsis end" "$_tr_exp_end" "$_tr_gb_end"
+assert_eq "truncated: body starts at command text" "$_tr_exp_start" "$_tr_gb_start"
+COLUMNS=80
+
 
 reset_harness
 BUFFER="git ch"
