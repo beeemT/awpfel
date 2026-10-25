@@ -58,6 +58,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
 fi
 
 info "Installing zsh plugin to ${PLUGIN_DIR}/..."
+mkdir -p "${PLUGIN_DIR}"
 for module in awpfel.zsh awpfel-utils.zsh awpfel-render.zsh awpfel-interact.zsh awpfel-communicate.zsh; do
     cp "${SCRIPT_DIR}/plugin/${module}" "${PLUGIN_DIR}/"
 done

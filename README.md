@@ -99,6 +99,8 @@ cd awpfel
 ./install.sh
 ```
 
+The installer stores the shell modules in `~/.config/awpfel/` and creates the directory if needed.
+
 ---
 
 Restart your shell. Awpfel starts with the shell and imports your
