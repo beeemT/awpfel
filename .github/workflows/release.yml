@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vMAJOR.MINOR.PATCH tag to release
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -14,7 +23,7 @@ jobs:
     steps:
       - name: Reject prerelease and non-semver tags
         run: |
-          if [[ ! "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::release tags must be vMAJOR.MINOR.PATCH with no suffix"
             exit 1
           fi
@@ -28,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -42,7 +53,7 @@ jobs:
       - name: Build archives and formula
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           sh scripts/build-archives.sh "$VERSION"
           python3 scripts/generate-formula.py "$VERSION"
 
@@ -79,10 +90,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if gh release view "${{ github.ref_name }}" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release upload "${{ github.ref_name }}" dist/*.tar.gz dist/checksums.txt --clobber --repo "$GH_REPO"
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/checksums.txt --clobber --repo "$GH_REPO"
           else
-            gh release create "${{ github.ref_name }}" dist/*.tar.gz dist/checksums.txt --verify-tag --generate-notes --repo "$GH_REPO"
+            gh release create "$RELEASE_TAG" dist/*.tar.gz dist/checksums.txt --verify-tag --generate-notes --repo "$GH_REPO"
           fi
 
       - name: Update personal Homebrew tap
@@ -110,5 +121,5 @@ jobs:
           if git -C tap diff --cached --quiet; then
             exit 0
           fi
-          git -C tap commit -m "awpfel ${{ github.ref_name }}"
+          git -C tap commit -m "awpfel $RELEASE_TAG"
           GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git -C tap push

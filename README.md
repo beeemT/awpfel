@@ -207,6 +207,12 @@ make status           # Check daemon status
 make logs             # Show daemon logs
 ```
 
+If a tag push misses the release, run the release again from main for that tag.
+
+```bash
+gh workflow run release --repo beeemT/awpfel --ref main -f tag=vX.Y.Z
+```
+
 ## Credits
 
 Awpfel builds on two open projects:
