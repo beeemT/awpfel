@@ -1,8 +1,8 @@
 [package]
-name = "awen"
-version = "0.1.5"
+name = "awpfel"
+version = "0.2.0"
 edition = "2024"
-description = "Terminal Intelligence Layer — Smart when you need it. Silent when you don't."
+description = "On-device AI ghost text for zsh, backed by a managed local Apfel."
 license = "MIT"
 
 [dependencies]

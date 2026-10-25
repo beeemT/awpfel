@@ -1,221 +1,193 @@
 <div align="center">
-  <img src="docs/logo.png" alt="Awen Logo" />
-  <p><b>终端智能层 — 需要时出现，不需要时隐身。</b></p>
-  <a href="https://github.com/zzf2333/Awen/releases"><img src="https://img.shields.io/github/v/tag/zzf2333/Awen?label=version&style=flat-square" alt="Version"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
-  <a href="https://github.com/zzf2333/Awen/stargazers"><img src="https://img.shields.io/github/stars/zzf2333/Awen?style=flat-square" alt="Stars"></a>
-  <br/>
-  <a href="README.md">English</a>
-</div>
 
+# Awpfel
+
+**设备端 AI 补全，显示完整命令 ghost text。输入后看到命令，按 Tab 接受。**
+
+<a href="https://github.com/beeemT/awpfel/releases"><img src="https://img.shields.io/github/v/tag/beeemT/awpfel?label=version&style=flat-square" alt="Version"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
 <br/>
-
-<div align="center">
-  <img src="docs/Ghostty.png" width="1000" />
+<a href="README.md">English</a>
 </div>
-
-<br/>
-
-## 为什么做 Awen
-
-现代终端很快，但不聪明。你反复敲同样的命令、忘记参数、打错路径、面对晦涩的报错无从下手。Warp 之类的工具把智能塞进了一个全新终端 — 重、封闭、有自己的一套规矩。
-
-Awen 反其道而行：一个轻量 daemon 挂在你现有的 zsh 上。你打字时浮现 ghost text；命令失败时弹出修复建议；敲了危险命令时闪烁警告。全部在 **20ms** 内完成。AI 作为异步后备可用但从不强制 — 本地优先，始终离线可用。
-
-**只建议，不执行。** Awen 不是 shell agent，不是自动化工具，不是终端模拟器。卡住时它低语一句，顺畅时它消失不见。
-
-名字来自威尔士语，意为"诗意的灵感" — 不请自来的微风，不留痕迹。
 
 ## 功能
 
-| 功能           | 做什么                                        | 速度  |
-| :------------- | :-------------------------------------------- | :---- |
-| **Ghost Text** | 基于历史 + 命令规格 + 序列预测的行内补全       | <5ms  |
-| **失败修复**   | 识别 18 种报错模式，建议修复命令              | 即时  |
-| **风险检测**   | 24 种危险命令模式，回车前警告                 | 即时  |
-| **命令规格**   | 143 条内置规格 — 子命令、参数、说明           | <20ms |
-| **AI 补全**    | DeepSeek / Ollama 异步后备，本地不够时兜底    | 异步  |
-| **自然语言**   | 输入 `# 查找大文件` → 得到 shell 命令         | 异步  |
-| **上下文感知** | 跟踪 git 状态、项目类型、会话历史、上次退出码 | 持续  |
+Awpfel 在 zsh 输入时显示 ghost text。Ghost text 是完整命令，
+来自设备端 AI，并以相关历史作为上下文。你接受或忽略它。
+Awpfel 从不执行命令。
 
-## 截图
+- 输入部分命令。Ghost text 显示完整命令。
+- 按 **Tab** 把 ghost text 接受到命令行中编辑。
+- 按 **Enter** 只运行已输入的内容。Enter 从不接受 ghost text。
+- 没有 ghost text 时继续输入。没有东西会强加给你。
 
-<table>
-<tr>
-<td width="50%"><b>历史 + 规格下拉菜单</b><br/><img src="docs/history.png" width="500" /></td>
-<td width="50%"><b>命令规格（Flags）</b><br/><img src="docs/options.png" width="500" /></td>
-</tr>
-<tr>
-<td><b>文件路径 Ghost Text</b><br/><img src="docs/cd.png" width="500" /></td>
-<td><b>风险警告面板</b><br/><img src="docs/warning.png" width="500" /></td>
-</tr>
-<tr>
-<td><b>失败修复面板</b><br/><img src="docs/fix.png" width="500" /></td>
-<td><b>AI 建议</b><br/><img src="docs/ai.png" width="500" /></td>
-</tr>
-</table>
+## 按键
 
-## 安装
+| 按键 | 动作 |
+| :-- | :--- |
+| `Tab` / `→` | 把全部 ghost text 接受到命令行中编辑 |
+| `Shift-Tab` / `Ctrl-→` 或 `Alt-→` | 接受 ghost text 的下一个 shell 词块，再按一次接受下一块 |
+| `Enter` | 运行已输入的行（从不接受 ghost text） |
+| `Ctrl-X` 然后 `A` | 把当前行直接替换为 AI 生成的命令，放在行内，不执行 |
 
-### Homebrew（macOS / Linux）
+注意：`Ctrl-X A` 指先按 `Ctrl-X`，松开，再按 `A`。
+它不是 `Ctrl-X Ctrl-A`。它从不执行结果。
+单独按 Enter 只运行行内已有内容。
 
-```bash
-brew install zzf2333/tap/awen
-awen setup
-```
+## 补全显示
 
-### 一键脚本
+Ghost text 有两种形式：
 
-```bash
-curl -sSL https://raw.githubusercontent.com/zzf2333/Awen/main/install-remote.sh | sh
-```
+- **后缀 ghost。** 显示文本从输入结尾处开始。一次接受全部，
+  或只接受下一个 shell 词块，例如一次接受一个带引号的参数。
+- **替换预览。** 最佳匹配不是输入的前缀。Awpfel 显示
+  完整命令供检查。接受时替换整行，或先接受第一个建议块。
 
-### 从源码构建
+引号文本和转义空格保持为一块。光标在词中时，按块接受先补完该词。
+接受只编辑行内内容，从不执行。只有 `Ctrl-X A` 在 ghost 流程之外
+直接替换行内内容，它从不执行。
 
-**前置条件：** Rust 1.85+、zsh
+## 自然语言
 
-```bash
-git clone https://github.com/zzf2333/Awen.git
-cd Awen
-./install.sh
-```
-
----
-
-重启 shell 即可。Awen 首次启动会自动导入 zsh 历史。
-
-## 使用
-
-### 快捷键
-
-| 按键     | 操作                     |
-| :------- | :----------------------- |
-| `→`      | 接受完整 ghost text      |
-| `Ctrl+→` | 接受下一个词             |
-| `↑↓`     | 在建议菜单中导航         |
-| `Enter`  | 执行选中的建议           |
-| `Tab`    | 接受到命令行中编辑       |
-
-### 自然语言
-
-输入 `#` 加一句描述，Awen 翻译成命令：
+输入 `#` 加一句描述。生成的命令以次行 ghost 预览显示
+（`→ 完整命令`）。按 Tab 接受之前，行内内容不变。
+它不执行。
 
 ```
 # 找到所有今天修改过的 go 文件
 ```
 
-### CLI
+按 `Ctrl-X` 然后 `A` 把当前行直接替换为生成的命令。
+结果进入命令行等待编辑，不会直接执行。
+
+## 安装
+
+Awpfel 需要 Apple Silicon 上的 macOS 26（Tahoe）或更高版本。
+它使用 Apfel CLI 提供设备端 AI。
+
+### Homebrew
 
 ```bash
-awen setup              # 配置 shell 集成
-awen start              # 启动 daemon
-awen stop               # 停止 daemon
-awen status             # 查看状态（pid、运行时间、历史条数）
-awen logs               # 查看最近日志
-awen config             # 查看配置
-awen context            # 查看当前上下文状态
-awen history import     # 导入 zsh 历史
+brew install beeemT/tap/awpfel
+awpfel setup
+```
+
+`awpfel setup` 安装配置和 shell 集成并启动后台 daemon。
+Daemon 管理自己的本地 Apfel。不需要运行
+`brew services start apfel`。
+
+### 一键脚本
+
+只在本机运行（macOS Apple Silicon）。它从最新 release
+下载 macOS Apple Silicon 归档。
+
+```bash
+curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
+```
+
+### 从源码构建
+
+只在本机运行（macOS Apple Silicon）。
+`install.sh` 拒绝其他主机，用本地 Rust 工具链构建。
+
+**前置条件：** 当前稳定版 Rust、zsh、apfel、jq、socat。
+
+```bash
+git clone https://github.com/beeemT/awpfel.git
+cd awpfel
+./install.sh
+```
+
+---
+
+重启 shell。Awpfel 随 shell 启动，首次启动自动导入 zsh 历史。
+
+## 更新
+
+### Homebrew
+
+```bash
+brew upgrade beeemT/tap/awpfel
+awpfel stop && awpfel start
+```
+
+### 一键脚本
+
+```bash
+curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
+```
+
+### 从源码
+
+```bash
+cd awpfel
+git pull
+./install.sh
+```
+
+更新后重启 shell。
+
+## 卸载
+
+```bash
+awpfel uninstall --yes
+```
+
+这会停止 daemon，从 `~/.zshrc` 删除 shell 集成，并删除
+`~/.config/awpfel/` 和 `~/.local/share/awpfel/`。
+不带 `--yes` 只做一次全局确认。
+
+**Homebrew：**
+
+```bash
+brew uninstall awpfel
+```
+
+**一键脚本 / 源码安装：**
+
+```bash
+rm ~/.local/bin/awpfel
+rm -rf ~/.config/awpfel
+rm -rf ~/.local/share/awpfel
+# 从 ~/.zshrc 删除 awpfel 相关行
+```
+
+## CLI
+
+```bash
+awpfel setup              # 配置 shell 集成，启动 daemon
+awpfel start              # 启动 daemon
+awpfel stop               # 停止 daemon
+awpfel status             # 查看状态（pid、运行时间、历史条数）
+awpfel logs               # 查看最近日志
+awpfel config             # 查看配置
+awpfel context            # 查看当前上下文状态
+awpfel history import     # 导入 zsh 历史
 ```
 
 ## 配置
 
-配置文件在 `~/.config/awen/config.toml`，所有字段都有合理默认值。
-
-<details>
-<summary>完整配置参考</summary>
+配置文件在 `~/.config/awpfel/config.toml`，所有字段都有默认值。
+默认值指向受管本地 Apfel。
 
 ```toml
 [ai]
-enabled = true                  # 开关 AI 补全
-base_url = "https://api.deepseek.com"   # 任意 OpenAI 兼容接口
-model = "deepseek-chat"         # 模型名称
-api_key = ""                    # 或设置 AWEN_API_KEY 环境变量
-debounce_ms = 300               # 触发 AI 前的延迟
-timeout_ms = 30000              # AI 请求超时（异步，不阻塞输入）
-max_tokens = 1024               # AI 最大生成 token 数
-min_local_candidates = 2        # 本地候选数低于此值且置信度也低时才触发 AI
-min_local_confidence = 0.6      # 本地最高置信度低于此值且候选数也少时才触发 AI
-cache_ttl_minutes = 30          # AI 响应缓存有效期
-
-# 切换服务商只需改 base_url 和 model：
-# DeepSeek:  base_url = "https://api.deepseek.com",      model = "deepseek-chat"
-# Ollama:    base_url = "http://localhost:11434/v1",      model = "qwen2.5-coder:7b"
-# OpenAI:    base_url = "https://api.openai.com",         model = "gpt-4o"
-
-[context]
-session_history_size = 20       # 会话记忆的命令数量
-stderr_max_chars = 500          # stderr 截断长度
-repo_detect = true              # 自动检测项目类型
-git_context = true              # 采集 git 上下文
-capture_stderr = true           # 捕获 stderr 用于失败修复
-
-[ui]
-ghost_text_color = 242          # ghost text 颜色（ANSI 256）
-hint_style = "above"            # 提示位置："above" 或 "below"
-dropdown_max_items = 8          # 建议菜单最大条目
-risk_detection = true           # 高危命令警告
+enabled = true
+base_url = "http://127.0.0.1:11435/v1"
+model = "apple-foundationmodel"
 ```
 
-</details>
-
-### 自定义规格
-
-用户规格放在 `~/.config/awen/specs/`，会覆盖同名内置规格。TOML 格式：
-
-```toml
-[command]
-name = "mycli"
-description = "My custom tool"
-
-[[command.subcommands]]
-name = "deploy"
-description = "Deploy to production"
-
-[[command.subcommands.flags]]
-name = "--env"
-short = "-e"
-arg = "ENV"
-description = "Target environment"
-```
-
-### 自定义失败 & 风险模式
-
-在 `~/.config/awen/failure_patterns.toml` 和 `~/.config/awen/risk_patterns.toml` 中添加自定义规则。
-
-<details>
-<summary>内置命令规格（143 条）</summary>
-
-| 类别             | 命令                                                                                                                   |
-| :--------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| VCS & 开发生态   | `git`, `git-lfs`, `docker`, `npm`, `npx`, `cargo`, `brew`, `curl`, `ssh`                                               |
-| 云 & 基础设施    | `gh`, `kubectl`, `terraform`, `aws`, `gcloud`, `az`, `helm`                                                            |
-| 语言 & 运行时    | `python`, `go`, `node`, `deno`, `java`, `ruby`, `php`, `rustc`                                                         |
-| 包管理           | `pip`, `pipenv`, `pnpm`, `yarn`, `bun`, `uv`, `poetry`, `conda`, `gem`, `bundle`, `composer`, `dotnet`, `rustup`, `cmake`, `make` |
-| AI 工具          | `claude`, `codex`, `opencode`, `antigravity`                                                                           |
-| 文件操作         | `ls`, `rm`, `cp`, `mv`, `mkdir`, `touch`, `ln`, `chmod`, `chown`, `zip`, `unzip`, `gzip`                               |
-| 文本处理         | `cat`, `head`, `tail`, `grep`, `sed`, `awk`, `sort`, `uniq`, `wc`, `diff`, `cut`, `tr`, `tee`, `xargs`, `less`, `echo`, `jq`, `yq` |
-| 搜索 & 归档      | `find`, `tar`                                                                                                          |
-| 进程 & 系统      | `ps`, `kill`, `df`, `du`, `lsof`, `top`, `free`, `crontab`, `env`, `which`, `file`, `date`, `uname`, `hostname`, `uptime`, `htop` |
-| 网络             | `ping`, `dig`, `wget`, `ss`, `nmap`, `scp`, `rsync`, `ssh-keygen`, `nc`, `traceroute`, `ip`                            |
-| 安全 & 加密      | `openssl`, `gpg`                                                                                                       |
-| 系统管理         | `systemctl`, `journalctl`                                                                                              |
-| 终端复用         | `tmux`, `screen`                                                                                                       |
-| 测试 & Lint      | `pytest`, `ruff`, `eslint`, `prettier`, `vitest`, `flake8`, `mypy`, `isort`, `black`                                    |
-| 任务运行 & CI    | `just`, `pre-commit`, `act`                                                                                            |
-| 构建 & 打包      | `tsc`, `vite`, `webpack`, `next`                                                                                       |
-| 现代 CLI 工具    | `rg`, `fd`, `bat`, `eza`, `fzf`, `delta`, `hyperfine`, `lazygit`, `sd`, `procs`, `dust`, `duf`, `zoxide`                |
-| HTTP 客户端      | `http` (HTTPie)                                                                                                        |
-| 数据库 CLI       | `psql`, `mysql`, `redis-cli`, `mongosh`, `sqlite3`                                                                     |
-
-</details>
+把 `ai.enabled = false` 可关闭 AI。
 
 ## 安全边界
 
-- **从不执行** — 所有建议都需要用户明确操作
-- **从不读取敏感文件** — .env、.ssh、kubeconfig、凭证文件一律不碰
-- **隐私过滤** — 含 key/token/secret/password 的环境变量被脱敏；stderr 中的 token 被遮蔽
-- **离线可用** — 所有本地功能无需网络；AI 完全可选
-- **不是 agent** — 不修改文件、不后台执行、无副作用
+- **从不执行。** 先接受 ghost text，Enter 才能运行它。`Ctrl-X A` 直接替换行内内容，但从不执行。
+- **历史是上下文。** 历史条目作为不可信输入进入模型提示词。
+  发送前会做脱敏。
+- **从不读取敏感文件。** 不碰 `.env`、`.ssh` 或密钥文件。
+- **隐私过滤。** 疑似密钥的值在离机前遮蔽。过滤是尽力而为。
+- **设备端 AI。** 默认后端是受管本地 Apfel。不需要 API key，
+  不需要云账号。
 
 ## 开发
 
@@ -224,49 +196,24 @@ make dev              # Debug 构建 + 同步 + 重启 daemon
 make release          # Release 构建 + 同步 + 重启
 make test             # cargo test + shellcheck + zsh 冒烟测试
 make lint             # clippy + fmt check + shellcheck
-make sync             # 只复制 specs/plugin（不重新编译）
+make sync             # 只复制 plugin（不重新编译）
 make status           # 查看 daemon 状态
 make logs             # 查看 daemon 日志
 ```
 
-<details>
-<summary>项目结构</summary>
+## 致谢
 
-```
-src/
-├── main.rs              # CLI 入口（clap）
-├── daemon.rs            # Unix socket 服务，请求分发
-├── protocol.rs          # JSON 请求/响应类型
-├── config.rs            # TOML 配置，serde 默认值
-├── pipeline.rs          # AI 触发策略，合并逻辑
-├── arbitrator.rs        # 去重、上下文加权、排序、取前 8
-├── sanitize.rs          # 隐私过滤
-├── context/
-│   ├── mod.rs           # 上下文引擎
-│   ├── session.rs       # 会话历史环
-│   ├── git.rs           # Git 分支/状态
-│   └── repo.rs          # 项目类型检测
-└── layer/
-    ├── history.rs       # SQLite + nucleo 模糊匹配 + bigram 序列预测
-    ├── specs.rs         # TOML 命令规格
-    ├── ai.rs            # DeepSeek / Ollama 提供方
-    ├── failure.rs       # stderr → 修复建议
-    ├── risk.rs          # 输入 → 危险警告
-    └── history_import.rs
-plugin/
-└── awen.zsh             # zsh widget（ghost text、菜单、提示）
-sp
-└── *.toml               # 143 条内置命令规格
-```
+Awpfel 基于两个开源项目：
 
-</details>
+- SaoNian（zzf2333）的 [Awen](https://github.com/zzf2333/Awen)，
+  MIT 许可。Awpfel 是 Awen 的 fork，产品和后端改为设备端 AI。
+- [Apfel](https://github.com/Arthur-Ficial/apfel)，MIT 许可，
+  提供 Awpfel 查询的设备端模型。
 
-## 设计哲学
+Awen 原始 MIT 版权保留在 LICENSE 中。
 
-- **低语，而非喊叫。** 建议以 ghost text 呈现 — 可见但不打扰。没有弹窗、没有声音、不抢注意力。
-- **卡住时才出现。** 最好的工具是你忘记它在运行的那种。Awen 在你犹豫、失败或触碰危险时才现身。
-- **本地优先，AI 其次。** 历史和规格在 5ms 内响应。AI 是后备而非依赖 — 完全可选。
-- **如空气般存在。** 随 shell 启动的终端 daemon，占用极少资源，关掉终端就消失。
+Awpfel 是独立项目，与 Awen 作者、Apfel、Apple 均无关联，
+也未获其背书或赞助。
 
 ## License
 

@@ -1,184 +1,114 @@
-name: Release
+name: release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
 
 permissions:
   contents: write
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-14
-            cross: false
-          - target: x86_64-apple-darwin
-            runner: macos-latest
-            cross: false
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            cross: false
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            cross: true
-
-    runs-on: ${{ matrix.runner }}
-
+  check-tag:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build
+      - name: Reject prerelease and non-semver tags
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
+          if [[ ! "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release tags must be vMAJOR.MINOR.PATCH with no suffix"
+            exit 1
           fi
 
-      - name: Codesign (macOS)
-        if: runner.os == 'macOS'
-        run: codesign -fs - target/${{ matrix.target }}/release/awen
+  build:
+    needs: check-tag
+    runs-on: macos-14
+    timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: Package
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          ARCHIVE="awen-${VERSION}-${{ matrix.target }}"
-          mkdir -p "${ARCHIVE}"
-          cp "target/${{ matrix.target }}/release/awen" "${ARCHIVE}/"
-          cp plugin/awen.zsh "${ARCHIVE}/"
-          cp LICENSE "${ARCHIVE}/"
-          tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
-          shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
-
-      - uses: actions/upload-artifact@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          name: awen-${{ matrix.target }}
-          path: |
-            awen-*.tar.gz
-            awen-*.tar.gz.sha256
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-apple-darwin
+
+      - name: Build archives and formula
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          sh scripts/build-archives.sh "$VERSION"
+          python3 scripts/generate-formula.py "$VERSION"
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: awpfel-package
+          path: dist/
+          retention-days: 1
 
   release:
     needs: build
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
-      - name: Generate SHA256SUMS
-        run: cat *.sha256 > SHA256SUMS
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            awen-*.tar.gz
-            SHA256SUMS
-
-  update-homebrew:
-    needs: release
-    runs-on: ubuntu-latest
-    if: "!contains(github.ref_name, '-rc')"
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
-      - name: Update Homebrew formula
+      - name: Check release secret before publication
         env:
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-
-          SHA_ARM64_DARWIN=$(grep -h "aarch64-apple-darwin" *.sha256 | awk '{print $1}')
-          SHA_X86_64_DARWIN=$(grep -h "x86_64-apple-darwin" *.sha256 | awk '{print $1}')
-          SHA_X86_64_LINUX=$(grep -h "x86_64-unknown-linux-gnu" *.sha256 | awk '{print $1}')
-          SHA_ARM64_LINUX=$(grep -h "aarch64-unknown-linux-gnu" *.sha256 | awk '{print $1}')
-
-          if [ -z "$SHA_ARM64_DARWIN" ] || [ -z "$SHA_X86_64_DARWIN" ] || [ -z "$SHA_X86_64_LINUX" ] || [ -z "$SHA_ARM64_LINUX" ]; then
-            echo "::error::Failed to extract SHA256 hashes"
+          if [[ -z "$TAP_TOKEN" ]]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is required before publication"
             exit 1
           fi
 
-          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/zzf2333/homebrew-tap.git"
-          cd homebrew-tap
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: awpfel-package
+          path: dist
 
-          mkdir -p Formula
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ github.ref_name }}" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" dist/*.tar.gz dist/checksums.txt --clobber --repo "$GH_REPO"
+          else
+            gh release create "${{ github.ref_name }}" dist/*.tar.gz dist/checksums.txt --verify-tag --generate-notes --repo "$GH_REPO"
+          fi
 
-          cat > Formula/awen.rb << RUBY
-          class Awen < Formula
-            desc "Terminal Intelligence Layer - Smart when you need it, silent when you don't"
-            homepage "https://github.com/zzf2333/Awen"
-            version "${VERSION}"
-            license "MIT"
-
-            depends_on "jq"
-            depends_on "socat"
-
-            on_macos do
-              on_arm do
-                url "https://github.com/zzf2333/Awen/releases/download/v${VERSION}/awen-${VERSION}-aarch64-apple-darwin.tar.gz"
-                sha256 "${SHA_ARM64_DARWIN}"
-              end
-              on_intel do
-                url "https://github.com/zzf2333/Awen/releases/download/v${VERSION}/awen-${VERSION}-x86_64-apple-darwin.tar.gz"
-                sha256 "${SHA_X86_64_DARWIN}"
-              end
-            end
-
-            on_linux do
-              on_arm do
-                url "https://github.com/zzf2333/Awen/releases/download/v${VERSION}/awen-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_ARM64_LINUX}"
-              end
-              on_intel do
-                url "https://github.com/zzf2333/Awen/releases/download/v${VERSION}/awen-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_X86_64_LINUX}"
-              end
-            end
-
-            def install
-              bin.install "awen"
-              (share/"awen").install "awen.zsh"
-            end
-
-            def caveats
-              <<~EOS
-                Run "awen setup" to configure your shell, then restart your terminal.
-              EOS
-            end
-
-            test do
-              assert_match version.to_s, shell_output("#{bin}/awen --version")
-            end
-          end
-          RUBY
-
-          # Remove leading whitespace from heredoc
-          sed -i 's/^          //' Formula/awen.rb
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/awen.rb
-          git commit -m "awen ${VERSION}"
-          git push
+      - name: Update personal Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *Password*) printf '%s\n' "$TAP_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          ASKPASS
+          chmod 700 "$askpass"
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git clone "https://github.com/beeemT/homebrew-tap.git" tap
+          cp "dist/awpfel.rb" tap/Formula/awpfel.rb
+          git -C tap config user.name github-actions[bot]
+          git -C tap config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C tap add Formula/awpfel.rb
+          if git -C tap diff --cached --quiet; then
+            exit 0
+          fi
+          git -C tap commit -m "awpfel ${{ github.ref_name }}"
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git -C tap push

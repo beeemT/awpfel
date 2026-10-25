@@ -1,109 +1,128 @@
 <div align="center">
-  <img src="docs/logo.png" alt="Awen Logo" />
-  <p><b>Terminal Intelligence Layer — Smart when you need it. Silent when you don't.</b></p>
-  <a href="https://github.com/zzf2333/Awen/releases"><img src="https://img.shields.io/github/v/tag/zzf2333/Awen?label=version&style=flat-square" alt="Version"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
-  <a href="https://github.com/zzf2333/Awen/stargazers"><img src="https://img.shields.io/github/stars/zzf2333/Awen?style=flat-square" alt="Stars"></a>
-  <br/>
-  <a href="README_CN.md">中文</a>
+
+# Awpfel
+
+**On-device AI ghost text for zsh. Type, see the full command, press Tab.**
+
+<a href="https://github.com/beeemT/awpfel/releases"><img src="https://img.shields.io/github/v/tag/beeemT/awpfel?label=version&style=flat-square" alt="Version"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
+<br/>
+<a href="README_CN.md">中文</a>
 </div>
 
-<br/>
+## What it does
 
-<div align="center">
-  <img src="docs/Ghostty.png" width="1000" />
-</div>
+Awpfel shows ghost text as you type in zsh. The ghost text is a full
+command. It comes from on-device AI with your relevant shell history as
+context. You accept it or you ignore it. Awpfel never runs a command.
 
-<br/>
+- Type part of a command. Ghost text shows the full command.
+- Press **Tab** to accept the ghost text into the line for editing.
+- Press **Enter** to run what you typed. Enter never accepts ghost text.
+- If no ghost text shows, keep typing. Nothing is forced on you.
 
-## Why
+## Keys
 
-Modern terminals are fast but dumb. You repeat the same commands, forget flags, mistype paths, and get cryptic errors. Tools like Warp bundle intelligence into a full terminal — heavy, closed, and opinionated.
+| Key | Action |
+| :-- | :----- |
+| `Tab` / `→` | Accept all ghost text into the line for editing |
+| `Shift-Tab` / `Ctrl-→` or `Alt-→` | Accept the next shell-word chunk of ghost text; press again for the next |
+| `Enter` | Run the line as typed (never accepts ghost text) |
+| `Ctrl-X` then `A` | Replace the line with an AI-built command, in place, without running it |
 
-Awen takes the opposite approach: a thin daemon that attaches to your existing zsh. Ghost text appears as you type; when a command fails, a fix suggestion shows up; when something is dangerous, a warning flashes. All within **20ms**. AI is available as an async fallback but never required — local-first by design, always offline-capable.
+Note: `Ctrl-X A` means press `Ctrl-X`, release, then press `A`.
+It is not `Ctrl-X Ctrl-A`. It never runs the result.
+Enter alone only runs what is in the line.
 
-**Always suggests, never executes.** Awen is not a shell agent, not an automation tool, not a terminal emulator. It whispers when you're stuck and disappears when you're not.
+## Completion display
 
-The name comes from the Welsh word for "poetic inspiration" — a breeze that arrives uninvited and leaves no trace.
+- **Suffix ghost.** The shown text starts where your input ends.
+  Accept it all at once, or take only the next shell-word chunk
+  instead, for example one quoted argument at a time.
+- **Replacement preview.** The best match does not start with your
+  input. Awpfel shows the full command for review. Accepting
+  replaces the whole line, or takes the first proposed chunk.
 
-## Features
+Quoted text and escaped spaces stay one chunk. If the cursor sits
+mid-word, chunk accept completes that word first. Acceptance only
+edits the line; it never runs it. Only `Ctrl-X A` replaces the line
+outside the ghost-text flow, and it never runs it.
 
-| Feature               | What it does                                                    | Speed   |
-| :-------------------- | :-------------------------------------------------------------- | :------ |
-| **Ghost Text**        | Inline completion from history + command specs + sequence prediction | <5ms    |
-| **File Completion**   | Warp-style directory/file path completion with fuzzy match      | <10ms   |
-| **Failure Recovery**  | Detects 18 error patterns, suggests the fix                     | instant |
-| **Risk Detection**    | Warns on 24 dangerous command patterns before you hit Enter     | instant |
-| **Command Specs**     | 143 built-in specs — subcommands, flags, descriptions           | <20ms   |
-| **AI Completion**     | DeepSeek / Ollama as async fallback when local isn't enough     | async   |
-| **Natural Language**  | Type `# find large files` → get the shell command               | async   |
-| **Context Awareness** | Tracks git state, project type, session history, last exit code | always  |
+## Natural language
 
-## Screenshots
+Type `#` plus a description. The built command appears as a
+next-line ghost preview (`→ full-command`). The line itself is
+unchanged until you press Tab to accept the preview. It never runs.
 
-<table>
-<tr>
-<td width="50%"><b>History + Specs Dropdown</b><br/><img src="docs/history.png" width="500" /></td>
-<td width="50%"><b>Command Specs (Flags)</b><br/><img src="docs/options.png" width="500" /></td>
-</tr>
-<tr>
-<td><b>File Path Ghost Text</b><br/><img src="docs/cd.png" width="500" /></td>
-<td><b>Risk Warning Panel</b><br/><img src="docs/warning.png" width="500" /></td>
-</tr>
-<tr>
-<td><b>Failure Recovery Panel</b><br/><img src="docs/fix.png" width="500" /></td>
-<td><b>AI Suggestions</b><br/><img src="docs/ai.png" width="500" /></td>
-</tr>
-</table>
+```
+# find all go files changed today
+```
+
+Press `Ctrl-X` then `A` to replace the current line with the built
+command. The result lands in the line for editing, never in the shell.
 
 ## Install
 
-### Homebrew (macOS / Linux)
+Awpfel needs macOS 26 (Tahoe) or later on Apple Silicon. It uses the Apfel
+CLI for on-device AI.
+
+### Homebrew
 
 ```bash
-brew install zzf2333/tap/awen
-awen setup
+brew install beeemT/tap/awpfel
+awpfel setup
 ```
 
-### Shell Script
+`awpfel setup` installs config and shell integration and starts the
+background daemon. The daemon manages a local Apfel on its own port.
+You do not run `brew services start apfel`.
+
+### Shell script
+
+Runs on this machine only (macOS Apple Silicon). It downloads the
+macOS Apple Silicon archive from the latest release.
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zzf2333/Awen/main/install-remote.sh | sh
+curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
 ```
 
-### Build from Source
+### Build from source
 
-**Prerequisites:** Rust 1.85+, zsh
+Runs on this machine only (macOS Apple Silicon). `install.sh`
+refuses other hosts and builds with the local Rust toolchain.
+
+**Prerequisites:** current stable Rust, zsh, apfel, jq, socat.
 
 ```bash
-git clone https://github.com/zzf2333/Awen.git
-cd Awen
+git clone https://github.com/beeemT/awpfel.git
+cd awpfel
 ./install.sh
 ```
 
 ---
 
-Restart your shell. Awen starts automatically and imports your zsh history on first launch.
+Restart your shell. Awpfel starts with the shell and imports your
+zsh history on first launch.
 
 ## Update
 
 ### Homebrew
 
 ```bash
-brew upgrade zzf2333/tap/awen
-awen stop && awen start
+brew upgrade beeemT/tap/awpfel
+awpfel stop && awpfel start
 ```
 
-### Shell Script
+### Shell script
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zzf2333/Awen/main/install-remote.sh | sh
+curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
 ```
 
-### From Source
+### From source
 
 ```bash
-cd Awen
+cd awpfel
 git pull
 ./install.sh
 ```
@@ -112,180 +131,69 @@ Restart your shell after updating.
 
 ## Uninstall
 
-### Step 1 — Remove data, config, and shell integration
-
 ```bash
-awen uninstall
+awpfel uninstall --yes
 ```
 
-This will:
-
-- Stop the daemon
-- Remove the `source` line from `~/.zshrc`
-- Delete `~/.config/awen/` (config, specs, plugin)
-- Delete `~/.local/share/awen/` (history database, logs)
-- Clean up runtime files (socket, pid)
-
-Use `awen uninstall --yes` to skip confirmation.
-
-### Step 2 — Remove the binary
+This stops the daemon, removes the shell integration from
+`~/.zshrc`, and deletes `~/.config/awpfel/` and
+`~/.local/share/awpfel/`. Without `--yes` it asks once
+for confirmation.
 
 **Homebrew:**
 
 ```bash
-brew uninstall zzf2333/tap/awen
+brew uninstall awpfel
 ```
 
-**Shell Script / Source install:**
+**Shell script / source install:**
 
 ```bash
-rm ~/.local/bin/awen
+rm ~/.local/bin/awpfel
+rm -rf ~/.config/awpfel
+rm -rf ~/.local/share/awpfel
+# Remove the awpfel source lines from ~/.zshrc
 ```
 
-## Usage
-
-### Interaction Modes
-
-Awen has two interaction modes, configured via `[ui] mode` in config or `AWEN_UI_MODE` env var:
-
-**Full (default)** — dropdown menu with source labels, risk panels, failure recovery panels. Up/Down navigate, Enter runs, Tab accepts for editing. Filesystem completions appear as ghost text only, never in the dropdown menu.
-
-**Minimal** — ghost text only, like zsh-autosuggestions. No dropdown menu, no panels. Up/Down/Enter pass through to the shell. Lightest footprint.
-
-If zsh-autosuggestions or fzf are detected, Awen automatically downgrades to minimal mode to avoid keybinding conflicts.
-
-### Keybindings
-
-| Key      | Minimal | Full | Action                               |
-| :------- | :-----: | :--: | :----------------------------------- |
-| `→`      |    ✓    |  ✓   | Accept full ghost text               |
-| `Ctrl+→` |    ✓    |  ✓   | Accept next word                     |
-| `↑↓`     |    —    |  ✓   | Navigate suggestion menu             |
-| `Enter`  |    —    |  ✓   | Run selected suggestion              |
-| `Tab`    |    ✓    |  ✓   | Accept into command line for editing |
-
-### Natural Language
-
-Type `#` followed by a description. Awen translates it to a command:
-
-```
-# find all go files modified today
-```
-
-### CLI
+## CLI
 
 ```bash
-awen setup              # Configure shell integration
-awen start              # Start daemon
-awen stop               # Stop daemon
-awen status             # Show status (pid, uptime, history count)
-awen logs               # Show recent logs
-awen config             # Show configuration
-awen context            # Show current context state
-awen history import     # Import zsh history
-awen uninstall          # Remove all data, config, and shell integration
+awpfel setup              # Configure shell integration, start daemon
+awpfel start              # Start daemon
+awpfel stop               # Stop daemon
+awpfel status             # Show status (pid, uptime, history count)
+awpfel logs               # Show recent logs
+awpfel config             # Show configuration
+awpfel context            # Show current context state
+awpfel history import     # Import zsh history
+awpfel uninstall          # Remove all data, config, and shell integration
 ```
 
 ## Configuration
 
-Config lives at `~/.config/awen/config.toml`. All fields have sensible defaults.
-
-<details>
-<summary>Full configuration reference</summary>
+Config lives at `~/.config/awpfel/config.toml`. All fields have
+defaults. The defaults point at the managed local Apfel backend.
 
 ```toml
 [ai]
-enabled = true                  # Toggle AI completion
-base_url = "https://api.deepseek.com"   # Any OpenAI-compatible endpoint
-model = "deepseek-chat"         # Model name
-api_key = ""                    # Or set AWEN_API_KEY env var
-debounce_ms = 300               # Delay before triggering AI
-timeout_ms = 30000              # AI request timeout (async, never blocks input)
-max_tokens = 1024               # Max tokens for AI generation
-min_local_candidates = 2        # AI triggers only when local results < this
-min_local_confidence = 0.6      # AND max confidence < this
-cache_ttl_minutes = 30          # Cache TTL for AI responses
-
-# Provider examples — just change base_url and model:
-# DeepSeek:  base_url = "https://api.deepseek.com",      model = "deepseek-chat"
-# Ollama:    base_url = "http://localhost:11434/v1",      model = "qwen2.5-coder:7b"
-# OpenAI:    base_url = "https://api.openai.com",         model = "gpt-4o"
-
-[context]
-session_history_size = 20       # Commands to remember in session
-stderr_max_chars = 500          # Max stderr length to capture
-repo_detect = true              # Auto-detect project type
-git_context = true              # Collect git context
-capture_stderr = true           # Capture stderr for failure recovery
-
-[ui]
-mode = "full"                   # "full" (menu + panels) or "minimal" (ghost only)
-ghost_text_color = 242          # Ghost text color (ANSI 256)
-hint_style = "above"            # Hint position: "above" or "below"
-dropdown_max_items = 8          # Max items in suggestion menu
-risk_detection = true           # Dangerous command warnings
+enabled = true
+base_url = "http://127.0.0.1:11435/v1"
+model = "apple-foundationmodel"
 ```
 
-</details>
-
-### Custom Specs
-
-User specs in `~/.config/awen/specs/` override built-ins. TOML format:
-
-```toml
-[command]
-name = "mycli"
-description = "My custom tool"
-
-[[command.subcommands]]
-name = "deploy"
-description = "Deploy to production"
-
-[[command.subcommands.flags]]
-name = "--env"
-short = "-e"
-arg = "ENV"
-description = "Target environment"
-```
-
-### Custom Failure & Risk Patterns
-
-Add your own patterns in `~/.config/awen/failure_patterns.toml` and `~/.config/awen/risk_patterns.toml`.
-
-<details>
-<summary>Built-in command specs (143)</summary>
-
-| Category               | Commands                                                                                                               |
-| :--------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| VCS & Dev Ecosystem    | `git`, `git-lfs`, `docker`, `npm`, `npx`, `cargo`, `brew`, `curl`, `ssh`                                               |
-| Cloud & Infrastructure | `gh`, `kubectl`, `terraform`, `aws`, `gcloud`, `az`, `helm`                                                            |
-| Languages & Runtimes   | `python`, `go`, `node`, `deno`, `java`, `ruby`, `php`, `rustc`                                                         |
-| Package Managers       | `pip`, `pipenv`, `pnpm`, `yarn`, `bun`, `uv`, `poetry`, `conda`, `gem`, `bundle`, `composer`, `dotnet`, `rustup`, `cmake`, `make` |
-| AI Tools               | `claude`, `codex`, `opencode`, `antigravity`                                                                           |
-| File Operations        | `ls`, `rm`, `cp`, `mv`, `mkdir`, `touch`, `ln`, `chmod`, `chown`, `zip`, `unzip`, `gzip`                               |
-| Text Processing        | `cat`, `head`, `tail`, `grep`, `sed`, `awk`, `sort`, `uniq`, `wc`, `diff`, `cut`, `tr`, `tee`, `xargs`, `less`, `echo`, `jq`, `yq` |
-| Search & Archive       | `find`, `tar`                                                                                                          |
-| Process & System       | `ps`, `kill`, `df`, `du`, `lsof`, `top`, `free`, `crontab`, `env`, `which`, `file`, `date`, `uname`, `hostname`, `uptime`, `htop` |
-| Networking             | `ping`, `dig`, `wget`, `ss`, `nmap`, `scp`, `rsync`, `ssh-keygen`, `nc`, `traceroute`, `ip`                            |
-| Security & Encryption  | `openssl`, `gpg`                                                                                                       |
-| System Administration  | `systemctl`, `journalctl`                                                                                              |
-| Terminal Multiplexers  | `tmux`, `screen`                                                                                                       |
-| Testing & Linting      | `pytest`, `ruff`, `eslint`, `prettier`, `vitest`, `flake8`, `mypy`, `isort`, `black`                                    |
-| Task Runners & CI      | `just`, `pre-commit`, `act`                                                                                            |
-| Build Tools & Bundlers | `tsc`, `vite`, `webpack`, `next`                                                                                       |
-| Modern CLI Tools       | `rg`, `fd`, `bat`, `eza`, `fzf`, `delta`, `hyperfine`, `lazygit`, `sd`, `procs`, `dust`, `duf`, `zoxide`                |
-| HTTP Clients           | `http` (HTTPie)                                                                                                        |
-| Database CLIs          | `psql`, `mysql`, `redis-cli`, `mongosh`, `sqlite3`                                                                     |
-
-</details>
+Set `ai.enabled = false` in the config file to turn AI off.
 
 ## Safety
 
-- **Never executes** — all suggestions require explicit user action
-- **Never reads sensitive files** — .env, .ssh, kubeconfig, credentials are off-limits
-- **Privacy filtering** — env vars with key/token/secret/password are sanitized; stderr tokens are redacted
-- **Offline-capable** — all local features work without network; AI is optional
-- **Not an agent** — no file modification, no background tasks, no side effects
+- **Never runs on its own.** Accept ghost text before Enter can run
+  it. `Ctrl-X A` replaces the line directly but never runs it.
+- **History is context.** History entries feed the model prompt as
+  untrusted input. Awpfel sanitizes them before sending.
+- **Never reads sensitive files.** No `.env`, `.ssh`, or key files.
+- **Privacy filter.** Values that look like keys or tokens are
+  redacted before they leave the machine. Filtering is best effort.
+- **On-device AI.** The default backend is the managed local Apfel.
+  No API key and no cloud account are needed.
 
 ## Development
 
@@ -294,57 +202,25 @@ make dev              # Debug build + sync + restart daemon
 make release          # Release build + sync + restart
 make test             # cargo test + shellcheck + zsh smoke
 make lint             # clippy + fmt check + shellcheck
-make sync             # Copy specs/plugin only (no rebuild)
+make sync             # Copy plugin only (no rebuild)
 make status           # Check daemon status
 make logs             # Show daemon logs
 ```
 
-<details>
-<summary>Project structure</summary>
+## Credits
 
-```
-src/
-├── main.rs              # CLI entry (clap)
-├── daemon.rs            # Unix socket server, request dispatch
-├── protocol.rs          # JSON request/response types
-├── config.rs            # TOML config with serde defaults
-├── pipeline.rs          # AI trigger policy, merge logic
-├── arbitrator.rs        # Dedup, context-weight, rank, top-8
-├── sanitize.rs          # Privacy filtering
-├── context/
-│   ├── mod.rs           # Context engine
-│   ├── session.rs       # Session history ring
-│   ├── git.rs           # Git branch/status
-│   └── repo.rs          # Project type detection
-└── layer/
-    ├── history.rs       # SQLite + nucleo fuzzy match + bigram sequence prediction
-    ├── specs.rs         # TOML command specs
-    ├── ai.rs            # DeepSeek / Ollama providers
-    ├── failure.rs       # Stderr → fix suggestion
-    ├── risk.rs          # Input → danger warning
-    ├── filesystem.rs    # Directory/file path completion (ghost-only)
-    └── history_import.rs
-plugin/
-├── awen.zsh             # Entry point: globals, init, module sourcing
-├── awen-utils.zsh       # JSON, socket, time, layout helpers
-├── awen-source.zsh      # Source labels/styles/icons, highlight manager
-├── awen-render.zsh      # Ghost text, menu, panels rendering
-├── awen-interact.zsh    # ZLE widget handlers (accept, dismiss, navigate)
-└── awen-communicate.zsh # Request/response, async AI, hooks
-specs/
-└── *.toml               # 143 built-in command specs
-```
+Awpfel builds on two open projects:
 
-</details>
+- [Awen](https://github.com/zzf2333/Awen) by SaoNian (zzf2333),
+  MIT licensed. Awpfel is a fork of Awen with the product and
+  backend changed to on-device AI.
+- [Apfel](https://github.com/Arthur-Ficial/apfel), MIT licensed,
+  which serves the on-device model Awpfel queries.
 
-## Background
+The original MIT copyright from Awen is preserved in LICENSE.
 
-Awen follows a few design principles:
-
-- **Whisper, not shout.** Suggestions are ghost text — visible but unintrusive. No popups, no sound, no forced attention.
-- **Appear when stuck.** The best tool is the one you forget is running. Awen stays invisible until you hesitate, fail, or reach for something dangerous.
-- **Local first, AI second.** History and specs respond in under 5ms. AI is a fallback, not a crutch — and it's fully optional.
-- **Exist like air.** A terminal daemon that starts with your shell, uses minimal resources, and disappears when you close it.
+Awpfel is an independent project. It is not affiliated with,
+endorsed by, or sponsored by the Awen authors, Apfel, or Apple.
 
 ## License
 

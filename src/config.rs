@@ -4,11 +4,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
-pub struct AwenConfig {
+pub struct AwpfelConfig {
     pub ai: AiConfig,
     pub context: ContextConfig,
     pub ui: UiConfig,
-    pub filesystem: FilesystemConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,9 +20,6 @@ pub struct AiConfig {
     pub debounce_ms: u64,
     pub timeout_ms: u64,
     pub max_tokens: u32,
-    pub cache_ttl_minutes: u32,
-    pub min_local_candidates: usize,
-    pub min_local_confidence: f64,
     pub features: AiFeaturesConfig,
 }
 
@@ -50,17 +46,14 @@ pub struct ContextConfig {
 pub struct UiConfig {
     pub mode: UiMode,
     pub ghost_text_color: u8,
-    pub dropdown_max_items: usize,
-    pub hint_style: String,
     pub risk_detection: bool,
-    pub command_explanation: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiMode {
-    Minimal,
     #[default]
+    Minimal,
     Full,
 }
 
@@ -76,16 +69,14 @@ impl std::fmt::Display for UiMode {
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            base_url: "https://api.deepseek.com".into(),
-            model: "deepseek-chat".into(),
+            // On-device Apfel on the dedicated loopback endpoint: no key needed.
+            enabled: true,
+            base_url: "http://127.0.0.1:11435/v1".into(),
+            model: "apple-foundationmodel".into(),
             api_key: String::new(),
             debounce_ms: 300,
             timeout_ms: 30000,
-            max_tokens: 1024,
-            cache_ttl_minutes: 30,
-            min_local_candidates: 2,
-            min_local_confidence: 0.6,
+            max_tokens: 256,
             features: AiFeaturesConfig::default(),
         }
     }
@@ -94,9 +85,9 @@ impl Default for AiConfig {
 impl Default for AiFeaturesConfig {
     fn default() -> Self {
         Self {
-            error_recovery: true,
-            completion: false,
-            nl_generation: false,
+            error_recovery: false,
+            completion: true,
+            nl_generation: true,
         }
     }
 }
@@ -108,7 +99,7 @@ impl Default for ContextConfig {
             stderr_max_chars: 500,
             repo_detect: true,
             git_context: true,
-            capture_stderr: true,
+            capture_stderr: false,
         }
     }
 }
@@ -118,28 +109,7 @@ impl Default for UiConfig {
         Self {
             mode: UiMode::default(),
             ghost_text_color: 242,
-            dropdown_max_items: 8,
-            hint_style: "above".into(),
             risk_detection: true,
-            command_explanation: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FilesystemConfig {
-    pub enabled: bool,
-    pub cache_ttl_ms: u64,
-    pub max_scan_entries: usize,
-}
-
-impl Default for FilesystemConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            cache_ttl_ms: 2000,
-            max_scan_entries: 1000,
         }
     }
 }
@@ -152,7 +122,7 @@ pub fn config_dir() -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("~"))
                 .join(".config")
         })
-        .join("awen")
+        .join("awpfel")
 }
 
 pub fn data_dir() -> PathBuf {
@@ -163,7 +133,7 @@ pub fn data_dir() -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("~"))
                 .join(".local/share")
         })
-        .join("awen")
+        .join("awpfel")
 }
 
 pub fn runtime_dir() -> PathBuf {
@@ -174,16 +144,16 @@ pub fn runtime_dir() -> PathBuf {
 
 pub fn socket_path() -> PathBuf {
     let uid = unsafe { libc::getuid() };
-    runtime_dir().join(format!("awen-{uid}.sock"))
+    runtime_dir().join(format!("awpfel-{uid}.sock"))
 }
 
 pub fn pid_path() -> PathBuf {
     let uid = unsafe { libc::getuid() };
-    runtime_dir().join(format!("awen-{uid}.pid"))
+    runtime_dir().join(format!("awpfel-{uid}.pid"))
 }
 
 pub fn log_path() -> PathBuf {
-    data_dir().join("awen.log")
+    data_dir().join("awpfel.log")
 }
 
 pub fn history_db_path() -> PathBuf {
@@ -199,7 +169,7 @@ pub fn default_zsh_histfile() -> PathBuf {
         .join(".zsh_history")
 }
 
-pub fn load_config() -> AwenConfig {
+pub fn load_config() -> AwpfelConfig {
     let path = config_dir().join("config.toml");
     if path.exists() {
         match std::fs::read_to_string(&path) {
@@ -216,7 +186,7 @@ pub fn load_config() -> AwenConfig {
     } else {
         let dir = config_dir();
         std::fs::create_dir_all(&dir).ok();
-        let default = AwenConfig::default();
+        let default = AwpfelConfig::default();
         if let Ok(content) = toml::to_string_pretty(&default)
             && std::fs::write(&path, &content).is_ok()
         {
@@ -224,100 +194,9 @@ pub fn load_config() -> AwenConfig {
         }
         return default;
     }
-    AwenConfig::default()
+    AwpfelConfig::default()
 }
 
-pub fn load_config_from_str(s: &str) -> Result<AwenConfig, toml::de::Error> {
+pub fn load_config_from_str(s: &str) -> Result<AwpfelConfig, toml::de::Error> {
     toml::from_str(s)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_config() {
-        let config = AwenConfig::default();
-        assert!(!config.ai.enabled);
-        assert_eq!(config.ai.base_url, "https://api.deepseek.com");
-        assert_eq!(config.ai.model, "deepseek-chat");
-        assert!(config.ai.api_key.is_empty());
-        assert_eq!(config.ai.debounce_ms, 300);
-        assert_eq!(config.ai.min_local_candidates, 2);
-        assert!((config.ai.min_local_confidence - 0.6).abs() < f64::EPSILON);
-        assert!(config.ai.features.error_recovery);
-        assert!(!config.ai.features.completion);
-        assert!(!config.ai.features.nl_generation);
-        assert_eq!(config.context.session_history_size, 20);
-        assert!(config.context.capture_stderr);
-        assert_eq!(config.ui.mode, UiMode::Full);
-        assert_eq!(config.ui.ghost_text_color, 242);
-        assert_eq!(config.ui.dropdown_max_items, 8);
-        assert!(!config.ui.command_explanation);
-    }
-
-    #[test]
-    fn test_parse_config_toml() {
-        let toml_str = r#"
-[ai]
-enabled = false
-base_url = "http://localhost:11434/v1"
-model = "codellama:7b"
-debounce_ms = 500
-max_tokens = 100
-cache_ttl_minutes = 60
-
-[context]
-session_history_size = 30
-stderr_max_chars = 1000
-repo_detect = true
-git_context = false
-capture_stderr = true
-
-[ui]
-ghost_text_color = 240
-dropdown_max_items = 10
-hint_style = "below"
-risk_detection = true
-command_explanation = false
-"#;
-        let config: AwenConfig = load_config_from_str(toml_str).unwrap();
-        assert!(!config.ai.enabled);
-        assert_eq!(config.ai.base_url, "http://localhost:11434/v1");
-        assert_eq!(config.ai.model, "codellama:7b");
-        assert_eq!(config.ai.debounce_ms, 500);
-        assert_eq!(config.context.session_history_size, 30);
-        assert!(!config.context.git_context);
-        assert_eq!(config.ui.ghost_text_color, 240);
-        assert!(!config.ui.command_explanation);
-    }
-
-    #[test]
-    fn test_partial_config() {
-        let toml_str = r#"
-[ai]
-enabled = false
-"#;
-        let config: AwenConfig = load_config_from_str(toml_str).unwrap();
-        assert!(!config.ai.enabled);
-        assert_eq!(config.ai.base_url, "https://api.deepseek.com");
-        assert_eq!(config.context.session_history_size, 20);
-    }
-
-    #[test]
-    fn test_empty_config() {
-        let config: AwenConfig = load_config_from_str("").unwrap();
-        assert!(!config.ai.enabled);
-        assert_eq!(config.ai.model, "deepseek-chat");
-    }
-
-    #[test]
-    fn test_config_serialization() {
-        let config = AwenConfig::default();
-        let serialized = toml::to_string_pretty(&config).unwrap();
-        let parsed: AwenConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(config.ai.base_url, parsed.ai.base_url);
-        assert_eq!(config.ai.model, parsed.ai.model);
-        assert_eq!(config.ui.ghost_text_color, parsed.ui.ghost_text_color);
-    }
 }

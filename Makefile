@@ -1,6 +1,6 @@
 INSTALL_DIR := $(HOME)/.local/bin
-CONFIG_DIR  := $(HOME)/.config/awen
-DATA_DIR    := $(HOME)/.local/share/awen
+CONFIG_DIR  := $(HOME)/.config/awpfel
+DATA_DIR    := $(HOME)/.local/share/awpfel
 
 .PHONY: dev release sync restart test lint clean
 
@@ -12,37 +12,34 @@ dev: sync-bin-debug sync restart
 release: sync-bin-release sync restart
 	@echo "\033[0;32m[release]\033[0m ready — release build"
 
-# Build debug binary and copy to install dir
 sync-bin-debug:
 	cargo build
 	@mkdir -p $(INSTALL_DIR)
-	cp target/debug/awen $(INSTALL_DIR)/awen
+	cp target/debug/awpfel $(INSTALL_DIR)/awpfel
 	@if [ "$$(uname)" = "Darwin" ]; then \
-		xattr -cr $(INSTALL_DIR)/awen 2>/dev/null; \
-		codesign -fs - $(INSTALL_DIR)/awen 2>/dev/null; \
+		xattr -cr $(INSTALL_DIR)/awpfel 2>/dev/null; \
+		codesign -fs - $(INSTALL_DIR)/awpfel 2>/dev/null; \
 	fi
 
-# Build release binary and copy to install dir
 sync-bin-release:
 	cargo build --release
 	@mkdir -p $(INSTALL_DIR)
-	cp target/release/awen $(INSTALL_DIR)/awen
+	cp target/release/awpfel $(INSTALL_DIR)/awpfel
 	@if [ "$$(uname)" = "Darwin" ]; then \
-		xattr -cr $(INSTALL_DIR)/awen 2>/dev/null; \
-		codesign -fs - $(INSTALL_DIR)/awen 2>/dev/null; \
+		xattr -cr $(INSTALL_DIR)/awpfel 2>/dev/null; \
+		codesign -fs - $(INSTALL_DIR)/awpfel 2>/dev/null; \
 	fi
 
-# Sync plugin + specs only (no rebuild, for zsh-only changes)
 sync:
-	@mkdir -p $(CONFIG_DIR)/specs
-	cp plugin/awen*.zsh $(CONFIG_DIR)/
-	cp specs/*.toml $(CONFIG_DIR)/specs/
+	@mkdir -p $(CONFIG_DIR)
+	for module in awpfel.zsh awpfel-utils.zsh awpfel-render.zsh awpfel-interact.zsh awpfel-communicate.zsh; do \
+		cp plugin/$$module $(CONFIG_DIR)/; \
+	done
 
-# Restart daemon (stop if running, start fresh)
 restart:
-	@-$(INSTALL_DIR)/awen stop 2>/dev/null; true
+	@-$(INSTALL_DIR)/awpfel stop 2>/dev/null; true
 	@sleep 0.2
-	@$(INSTALL_DIR)/awen start &
+	@$(INSTALL_DIR)/awpfel start &
 	@sleep 0.5
 	@echo "\033[0;32m[daemon]\033[0m restarted"
 
@@ -50,6 +47,8 @@ restart:
 test:
 	cargo test
 	shellcheck install.sh
+	shellcheck install-remote.sh
+	shellcheck scripts/build-archives.sh
 	@if command -v zsh >/dev/null 2>&1; then \
 		zsh tests/zsh_smoke_test.zsh; \
 	fi
@@ -59,14 +58,14 @@ lint:
 	cargo clippy
 	cargo fmt --check
 	shellcheck install.sh
+	shellcheck install-remote.sh
+	shellcheck scripts/build-archives.sh
 
-# Status check
 status:
-	$(INSTALL_DIR)/awen status
+	$(INSTALL_DIR)/awpfel status
 
-# Show daemon logs (last 30 lines)
 logs:
-	$(INSTALL_DIR)/awen logs -l 30
+	$(INSTALL_DIR)/awpfel logs -l 30
 
 # Clean build artifacts
 clean:

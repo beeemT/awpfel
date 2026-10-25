@@ -94,22 +94,10 @@ pub struct SuggestResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The ghost-text candidate: always the FULL command the AI chose.
+/// The shell renders a suffix or an explicit replacement preview from it.
 pub struct Suggestion {
     pub text: String,
-    pub source: SuggestionSource,
-    pub confidence: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SuggestionSource {
-    History,
-    Specs,
-    Ai,
-    Failure,
-    Filesystem,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +122,6 @@ pub struct Warning {
 pub struct StatusConfig {
     pub ui_mode: String,
     pub ghost_text_color: u8,
-    pub dropdown_max_items: usize,
     pub capture_stderr: bool,
     pub stderr_max_chars: usize,
 }
@@ -237,10 +224,7 @@ mod tests {
     fn test_suggest_response_roundtrip() {
         let resp = Response::Suggest(SuggestResponse {
             suggestions: vec![Suggestion {
-                text: "it -p 3000:3000 myapp".into(),
-                source: SuggestionSource::Ai,
-                confidence: 0.92,
-                description: Some("run recently built image".into()),
+                text: "docker run -p 3000:3000 myapp".into(),
             }],
 
             hint: None,

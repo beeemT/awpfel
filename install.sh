@@ -12,11 +12,19 @@ warn() { echo -e "${YELLOW}[warn]${RESET} $1"; }
 error() { echo -e "${RED}[error]${RESET} $1"; }
 
 INSTALL_DIR="${HOME}/.local/bin"
-CONFIG_DIR="${HOME}/.config/awen"
+CONFIG_DIR="${HOME}/.config/awpfel"
 PLUGIN_DIR="${CONFIG_DIR}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check for Rust toolchain
+# Source install runs on this machine only (macOS Apple Silicon, like releases).
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    error "Unsupported OS: $(uname -s) (awpfel requires macOS)"
+    exit 1
+fi
+if [[ "$(uname -m)" != "arm64" && "$(uname -m)" != "aarch64" ]]; then
+    error "Unsupported architecture: $(uname -m) (awpfel requires Apple Silicon)"
+    exit 1
+fi
 if ! command -v cargo &>/dev/null; then
     error "Rust toolchain not found. Install via: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
     exit 1
@@ -24,75 +32,51 @@ fi
 
 # Check for zsh
 if ! command -v zsh &>/dev/null; then
-    warn "zsh not found. Awen requires zsh for the shell plugin."
+    warn "zsh not found. Awpfel requires zsh for the shell plugin."
 fi
 
-# Check for recommended tools
+# Check for required plugin helpers
 if ! command -v jq &>/dev/null; then
-    warn "jq not found. Install jq for more robust JSON handling (recommended)."
+    warn "jq not found. Install jq — the shell plugin needs it."
 fi
 if ! command -v socat &>/dev/null; then
     warn "socat not found. The plugin will fall back to zsh's built-in zsocket."
 fi
 
-info "Building awen (release mode)..."
+info "Building awpfel (release mode)..."
 cargo build --release --manifest-path "${SCRIPT_DIR}/Cargo.toml"
 
 info "Installing binary to ${INSTALL_DIR}..."
 mkdir -p "${INSTALL_DIR}"
-cp "${SCRIPT_DIR}/target/release/awen" "${INSTALL_DIR}/awen"
-chmod +x "${INSTALL_DIR}/awen"
+cp "${SCRIPT_DIR}/target/release/awpfel" "${INSTALL_DIR}/awpfel"
+chmod +x "${INSTALL_DIR}/awpfel"
 
 # macOS: clear quarantine/provenance attrs and re-sign so Gatekeeper won't SIGKILL
 if [[ "$(uname)" == "Darwin" ]]; then
-    xattr -cr "${INSTALL_DIR}/awen" 2>/dev/null
-    codesign -fs - "${INSTALL_DIR}/awen" 2>/dev/null
+    xattr -cr "${INSTALL_DIR}/awpfel" 2>/dev/null
+    codesign -fs - "${INSTALL_DIR}/awpfel" 2>/dev/null
 fi
 
-info "Installing specs to ${CONFIG_DIR}/specs/..."
-mkdir -p "${CONFIG_DIR}/specs"
-cp "${SCRIPT_DIR}"/specs/*.toml "${CONFIG_DIR}/specs/"
-
 info "Installing zsh plugin to ${PLUGIN_DIR}/..."
-cp "${SCRIPT_DIR}"/plugin/awen*.zsh "${PLUGIN_DIR}/"
+for module in awpfel.zsh awpfel-utils.zsh awpfel-render.zsh awpfel-interact.zsh awpfel-communicate.zsh; do
+    cp "${SCRIPT_DIR}/plugin/${module}" "${PLUGIN_DIR}/"
+done
 
-# Create default config if not exists
+# Create default config if not exists (defaults target the managed local Apfel)
 if [[ ! -f "${CONFIG_DIR}/config.toml" ]]; then
     info "Creating default config at ${CONFIG_DIR}/config.toml..."
-    cat > "${CONFIG_DIR}/config.toml" << 'EOF'
-[ai]
-enabled = true
-base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
-api_key = ""
-debounce_ms = 300
-timeout_ms = 30000
-max_tokens = 1024
-cache_ttl_minutes = 30
-
-[context]
-session_history_size = 20
-stderr_max_chars = 500
-repo_detect = true
-git_context = true
-capture_stderr = true
-
-[ui]
-ghost_text_color = 242
-dropdown_max_items = 8
-hint_style = "above"
-risk_detection = true
-command_explanation = false
-EOF
+    mkdir -p "${CONFIG_DIR}"
+    "${INSTALL_DIR}/awpfel" config > "${CONFIG_DIR}/config.toml" || warn "Could not write default config."
+    info "Defaults target the managed local Apfel (no API key needed)."
 else
     info "Config file already exists, skipping."
 fi
 
 # Create data directory
-mkdir -p "${HOME}/.local/share/awen"
+mkdir -p "${HOME}/.local/share/awpfel"
 
 echo ""
-info "${BOLD}Awen installed successfully!${RESET}"
+info "${BOLD}Awpfel installed successfully!${RESET}"
 echo ""
 
 # Interactive prompt helper: defaults to yes in non-interactive mode (pipe)
@@ -116,7 +100,7 @@ if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
     elif ask_yes "${BOLD}${INSTALL_DIR} is not in PATH. Add to ~/.zshrc?"; then
         {
             echo ""
-            echo "# Added by Awen installer"
+            echo "# Added by Awpfel installer"
             # shellcheck disable=SC2016
             echo 'export PATH="${HOME}/.local/bin:${PATH}"'
         } >> "${HOME}/.zshrc"
@@ -128,40 +112,25 @@ if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
     fi
 fi
 
-# Source the zsh plugin in .zshrc
-ZSHRC="${HOME}/.zshrc"
-SOURCE_LINE="source ${PLUGIN_DIR}/awen.zsh"
-
-if [[ -f "$ZSHRC" ]] && grep -qF "awen.zsh" "$ZSHRC"; then
-    info "awen.zsh is already sourced in .zshrc"
-elif ask_yes "${BOLD}Add 'source ~/.config/awen/awen.zsh' to ~/.zshrc?"; then
-    {
-        echo ""
-        echo "# Awen — Terminal Intelligence Layer"
-        echo "${SOURCE_LINE}"
-    } >> "$ZSHRC"
-    info "Added to ~/.zshrc"
-else
-    warn "Skipped. Add manually: ${SOURCE_LINE}"
-fi
+# Shell integration is handled by `awpfel setup` (source line + autostart block).
+# It runs next so a fresh install works without manual .zshrc edits.
+"${INSTALL_DIR}/awpfel" setup --yes
 
 echo ""
 echo -e "${BOLD}Quick start:${RESET}"
-echo "  Open a new terminal — Awen will start automatically."
-echo "  awen status   — check daemon status"
-echo "  awen stop     — stop the daemon"
-echo "  awen config   — view configuration"
+echo "  Open a new terminal — Awpfel starts automatically (managed local Apfel)."
+echo "  awpfel status   — check daemon status"
+echo "  awpfel stop     — stop the daemon"
+echo "  awpfel config   — view configuration"
 echo ""
-echo "  On first launch, Awen will import your zsh history automatically."
-echo "  To import manually: awen history import"
+echo "  On first launch, Awpfel imports your zsh history automatically."
+echo "  To import manually: awpfel history import"
 echo ""
-echo "For AI completions, set your API key in ${CONFIG_DIR}/config.toml"
-echo "or export AWEN_API_KEY=your-key"
-echo ""
+echo "AI runs on-device via the managed Apfel backend. No API key needed."
 echo "To disable AI completions: set ai.enabled = false in ${CONFIG_DIR}/config.toml"
 echo ""
 echo -e "${BOLD}To uninstall:${RESET}"
-echo "  rm ~/.local/bin/awen"
-echo "  rm -rf ~/.config/awen"
-echo "  rm -rf ~/.local/share/awen"
-echo "  # Remove 'source ~/.config/awen/awen.zsh' from ~/.zshrc"
+echo "  awpfel uninstall --yes"
+echo "  rm ~/.local/bin/awpfel"
+echo "  rm -rf ~/.config/awpfel"
+echo "  rm -rf ~/.local/share/awpfel"

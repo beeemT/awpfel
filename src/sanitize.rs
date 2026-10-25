@@ -70,26 +70,58 @@ pub fn sanitize_request_context(
     if let Some(ref stderr) = ctx.last_stderr {
         ctx.last_stderr = Some(sanitize_stderr(stderr, stderr_max_chars));
     }
-    ctx.session_commands = ctx
-        .session_commands
-        .iter()
-        .map(|c| sanitize_command(c))
-        .collect();
-    if let Some(ref branch) = ctx.git_branch {
-        ctx.git_branch = Some(
-            SENSITIVE_VALUE_RE
-                .replace_all(branch, "[REDACTED]")
-                .to_string(),
-        );
-    }
-    if let Some(ref status) = ctx.git_status {
-        ctx.git_status = Some(
-            SENSITIVE_VALUE_RE
-                .replace_all(status, "[REDACTED]")
-                .to_string(),
-        );
-    }
+    ctx.session_commands = sanitize_command_list(&ctx.session_commands);
+    ctx.git_branch = ctx.git_branch.as_deref().map(sanitize_branch_or_status);
+    ctx.git_status = ctx.git_status.as_deref().map(sanitize_branch_or_status);
     ctx.env_hints = sanitize_env_hints(&ctx.env_hints);
+}
+
+/// Sanitize history-match prompt inputs: single-line, bounded snippets so a
+/// full history dump can never blow the model window or smuggle control
+/// text past review.
+pub fn sanitize_history_matches(matches: &[String], max_entries: usize) -> Vec<String> {
+    sanitize_command_list_bounded(matches, max_entries, 140)
+}
+
+fn sanitize_command_list(commands: &[String]) -> Vec<String> {
+    sanitize_command_list_bounded(commands, usize::MAX, 140)
+}
+
+fn sanitize_command_list_bounded(
+    commands: &[String],
+    max_entries: usize,
+    max_chars: usize,
+) -> Vec<String> {
+    commands
+        .iter()
+        .take(max_entries)
+        .map(|c| clip_sanitized_command(&sanitize_command(c), max_chars))
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+fn sanitize_branch_or_status(value: &str) -> String {
+    SENSITIVE_VALUE_RE
+        .replace_all(value, "[REDACTED]")
+        .to_string()
+}
+
+fn clip_sanitized_command(command: &str, max_chars: usize) -> String {
+    let one_line: String = command
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if one_line.len() <= max_chars {
+        return one_line;
+    }
+    let mut end = max_chars;
+    while end > 0 && !one_line.is_char_boundary(end) {
+        end -= 1;
+    }
+    one_line[..end].to_string()
 }
 
 pub fn is_sensitive_path(path: &str) -> bool {
@@ -270,5 +302,20 @@ mod tests {
         assert!(is_sensitive_path("/home/user/.gnupg/private_key"));
         assert!(!is_sensitive_path("/home/user/project/src/main.rs"));
         assert!(!is_sensitive_path("/home/user/documents/readme.md"));
+    }
+
+    #[test]
+    fn test_sanitize_history_matches_bounded_and_redacted() {
+        let matches = vec![
+            "export API_KEY=sk-abcdefghijklmnopqrstuvwxyz12345".to_string(),
+            "git switch main".to_string(),
+            "npm run build".to_string(),
+        ];
+        let out = sanitize_history_matches(&matches, 2);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("[REDACTED]"));
+        assert!(!out[0].contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
+        // Single-line clipped snippets keep the prompt inside the model window.
+        assert!(out.iter().all(|s| !s.contains('\n')));
     }
 }

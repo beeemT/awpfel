@@ -2,21 +2,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use awen::config::AwenConfig;
-use awen::daemon::{self, DaemonPaths};
-use awen::layer::ai::{AiError, AiProvider};
-use awen::protocol::*;
+use awpfel::config::AwpfelConfig;
+use awpfel::daemon::{self, DaemonPaths};
+use awpfel::layer::ai::{AiError, AiProvider};
+use awpfel::protocol::*;
 
 fn test_paths(dir: &std::path::Path) -> DaemonPaths {
     DaemonPaths {
-        socket: dir.join("awen-test.sock"),
+        socket: dir.join("awpfel-test.sock"),
         db: dir.join("history-test.db"),
         config_dir: dir.join("config"),
     }
 }
 
-fn test_config() -> AwenConfig {
-    let mut config = AwenConfig::default();
+fn test_config() -> AwpfelConfig {
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = false;
     config.context.repo_detect = false;
     config.context.git_context = false;
@@ -74,17 +74,94 @@ impl AiProvider for FastMockProvider {
     }
 }
 
+struct CapturingProvider {
+    response: String,
+    last_prompt: std::sync::Mutex<Option<String>>,
+    call_count: std::sync::atomic::AtomicU32,
+}
+
+impl CapturingProvider {
+    fn new(response: &str) -> Self {
+        Self {
+            response: response.into(),
+            last_prompt: std::sync::Mutex::new(None),
+            call_count: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn prompt(&self) -> Option<String> {
+        self.last_prompt.lock().unwrap().clone()
+    }
+
+    fn record(&self, prompt: &str) {
+        self.call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.last_prompt.lock().unwrap() = Some(prompt.to_string());
+    }
+}
+
+#[async_trait::async_trait]
+impl AiProvider for CapturingProvider {
+    async fn complete(&self, prompt: &str, _max_tokens: u32) -> Result<String, AiError> {
+        self.record(prompt);
+        Ok(self.response.clone())
+    }
+
+    async fn complete_nl(&self, prompt: &str, _max_tokens: u32) -> Result<String, AiError> {
+        self.record(prompt);
+        Ok(self.response.clone())
+    }
+}
+
+// Model with a small context window: errors when the output reserve would
+// overflow the supported budget. Proves the NL route honors the configured
+// small max_tokens instead of forcing a large floor.
+struct SmallBudgetProvider {
+    context_window: u32,
+}
+
+#[async_trait::async_trait]
+impl AiProvider for SmallBudgetProvider {
+    async fn complete(&self, _prompt: &str, _max_tokens: u32) -> Result<String, AiError> {
+        Err(AiError::RequestFailed("unsupported route".into()))
+    }
+
+    async fn complete_nl(&self, prompt: &str, max_tokens: u32) -> Result<String, AiError> {
+        let prompt_tokens = prompt.len() as u32 / 4;
+        if prompt_tokens + max_tokens > self.context_window {
+            return Err(AiError::RequestFailed(format!(
+                "context overflow: {prompt_tokens} + {max_tokens} > {}",
+                self.context_window
+            )));
+        }
+        Ok("kubectl get pods --all-namespaces".into())
+    }
+}
+
+struct FailingProvider;
+
+#[async_trait::async_trait]
+impl AiProvider for FailingProvider {
+    async fn complete(&self, _prompt: &str, _max_tokens: u32) -> Result<String, AiError> {
+        Err(AiError::RequestFailed("injected failure".into()))
+    }
+
+    async fn complete_nl(&self, _prompt: &str, _max_tokens: u32) -> Result<String, AiError> {
+        Err(AiError::RequestFailed("injected failure".into()))
+    }
+}
+
 impl TestDaemon {
     async fn start() -> Self {
         Self::start_with_config_and_ai(test_config(), None).await
     }
 
-    async fn start_with_ai(config: AwenConfig, provider: Arc<dyn AiProvider>) -> Self {
+    async fn start_with_ai(config: AwpfelConfig, provider: Arc<dyn AiProvider>) -> Self {
         Self::start_with_config_and_ai(config, Some(provider)).await
     }
 
     async fn start_with_config_and_ai(
-        config: AwenConfig,
+        config: AwpfelConfig,
         ai_override: Option<Arc<dyn AiProvider>>,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -96,10 +173,10 @@ impl TestDaemon {
         });
 
         for _ in 0..50 {
-            if socket_path.exists() {
-                if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
-                    break;
-                }
+            let ready =
+                socket_path.exists() && tokio::net::UnixStream::connect(&socket_path).await.is_ok();
+            if ready {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -143,21 +220,12 @@ async fn test_daemon_start_and_status() {
             assert!(!s.ai_enabled);
             assert_eq!(s.history_count, 0);
             let cfg = s.config.expect("status should include config");
-            assert_eq!(cfg.ui_mode, "full");
-            assert_eq!(cfg.dropdown_max_items, 8);
-            assert!(cfg.capture_stderr);
+            assert_eq!(cfg.ui_mode, "minimal");
         }
         other => panic!("expected Status response, got: {other:?}"),
     }
 
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_daemon_shutdown() {
-    let daemon = TestDaemon::start().await;
     let socket_path = daemon.socket_path.clone();
-
     daemon.shutdown().await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -269,164 +337,6 @@ async fn test_context_cwd_tracking() {
 // ============================================================
 
 #[tokio::test]
-async fn test_suggest_specs_completion() {
-    let daemon = TestDaemon::start().await;
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "git ch".into(),
-        cursor_pos: 6,
-        context: RequestContext {
-            cwd: "/home/user/project".into(),
-            last_command: None,
-            last_exit_code: Some(0),
-            last_stderr: None,
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let resp = daemon.send(&req).await;
-    match resp {
-        Response::Suggest(s) => {
-            assert!(
-                !s.suggestions.is_empty(),
-                "should get specs suggestions for 'git ch'"
-            );
-            let has_checkout = s.suggestions.iter().any(|sg| sg.text.contains("checkout"));
-            let has_cherry_pick = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.text.contains("cherry-pick"));
-            assert!(
-                has_checkout || has_cherry_pick,
-                "should suggest git checkout or cherry-pick, got: {:?}",
-                s.suggestions.iter().map(|sg| &sg.text).collect::<Vec<_>>()
-            );
-            assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source == SuggestionSource::Specs)
-            );
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_suggest_history_after_record() {
-    let daemon = TestDaemon::start().await;
-
-    for _ in 0..3 {
-        daemon
-            .send(&Request::Record(RecordCommandRequest {
-                command: "docker compose up -d".into(),
-                exit_code: 0,
-                stderr: None,
-                cwd: "/home/user/project".into(),
-                duration_ms: Some(500),
-            }))
-            .await;
-    }
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "docker".into(),
-        cursor_pos: 6,
-        context: RequestContext {
-            cwd: "/home/user/project".into(),
-            last_command: None,
-            last_exit_code: Some(0),
-            last_stderr: None,
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let resp = daemon.send(&req).await;
-    match resp {
-        Response::Suggest(s) => {
-            let has_history = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::History);
-            assert!(
-                has_history,
-                "should get history suggestions after recording commands, got: {:?}",
-                s.suggestions
-            );
-            let has_compose = s.suggestions.iter().any(|sg| sg.text.contains("compose"));
-            assert!(
-                has_compose,
-                "history should contain 'docker compose up -d', got: {:?}",
-                s.suggestions.iter().map(|sg| &sg.text).collect::<Vec<_>>()
-            );
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_suggest_failure_recovery() {
-    let daemon = TestDaemon::start().await;
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "".into(),
-        cursor_pos: 0,
-        context: RequestContext {
-            cwd: "/home/user/project".into(),
-            last_command: Some("cargo build".into()),
-            last_exit_code: Some(1),
-            last_stderr: Some("error[E0432]: unresolved import `tokio`\ncould not find `tokio` in the list of imported crates".into()),
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let resp = daemon.send(&req).await;
-    match resp {
-        Response::Suggest(s) => {
-            let has_failure = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Failure);
-            assert!(
-                has_failure,
-                "should get failure recovery suggestion for missing crate, got: {:?}",
-                s.suggestions
-            );
-            let has_cargo_add = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.text.contains("cargo add tokio"));
-            assert!(
-                has_cargo_add,
-                "failure should suggest 'cargo add tokio', got: {:?}",
-                s.suggestions.iter().map(|sg| &sg.text).collect::<Vec<_>>()
-            );
-            assert!(s.hint.is_some(), "should have a failure recovery hint");
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
 async fn test_suggest_risk_warning() {
     let daemon = TestDaemon::start().await;
 
@@ -454,12 +364,9 @@ async fn test_suggest_risk_warning() {
                 s.warning.is_some(),
                 "should get risk warning for 'rm -rf /'"
             );
-            let warning_text = s.warning.unwrap().text.to_lowercase();
             assert!(
-                warning_text.contains("delete")
-                    || warning_text.contains("rm")
-                    || warning_text.contains("危"),
-                "warning should mention danger, got: {warning_text}"
+                s.suggestions.is_empty(),
+                "risk warning input produces no ghost"
             );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
@@ -572,7 +479,7 @@ async fn test_full_session_flow() {
         other => panic!("expected Context, got: {other:?}"),
     }
 
-    // 5. Suggest：失败后应给出 failure 建议
+    // 5. Suggest：AI-disabled daemon 不产生 ghost 建议（AI 是唯一的 ghost 来源）
     let req = Request::Suggest(SuggestRequest {
         input: "".into(),
         cursor_pos: 0,
@@ -596,20 +503,16 @@ async fn test_full_session_flow() {
     let resp = daemon.send(&req).await;
     match &resp {
         Response::Suggest(s) => {
-            let has_failure = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Failure);
             assert!(
-                has_failure,
-                "should suggest failure recovery after npm test failure"
+                s.suggestions.is_empty(),
+                "AI-disabled daemon should produce no ghost suggestions, got: {:?}",
+                s.suggestions.iter().map(|sg| &sg.text).collect::<Vec<_>>()
             );
-            assert!(s.hint.is_some(), "should have failure hint");
         }
         other => panic!("expected Suggest, got: {other:?}"),
     }
 
-    // 6. Suggest：输入 npm 应有 history 和 specs 建议
+    // 6. Suggest：输入 'npm ' 同样无建议（AI disabled → 无 ghost）
     let req = Request::Suggest(SuggestRequest {
         input: "npm ".into(),
         cursor_pos: 4,
@@ -630,15 +533,9 @@ async fn test_full_session_flow() {
     match &resp {
         Response::Suggest(s) => {
             assert!(
-                !s.suggestions.is_empty(),
-                "should have suggestions for 'npm '"
-            );
-            let sources: Vec<_> = s.suggestions.iter().map(|sg| sg.source).collect();
-            let has_specs = sources.contains(&SuggestionSource::Specs);
-            let has_history = sources.contains(&SuggestionSource::History);
-            assert!(
-                has_specs || has_history,
-                "should have specs or history suggestions for 'npm ', got sources: {sources:?}"
+                s.suggestions.is_empty(),
+                "AI-disabled daemon should produce no suggestions for 'npm ', got: {:?}",
+                s.suggestions.iter().map(|sg| &sg.text).collect::<Vec<_>>()
             );
         }
         other => panic!("expected Suggest, got: {other:?}"),
@@ -821,142 +718,12 @@ async fn test_risk_warning_with_suggestions_coexist() {
 }
 
 // ============================================================
-// AI fallback tests
-// ============================================================
-
-#[tokio::test]
-async fn test_ai_disabled_local_suggestions_work() {
-    let daemon = TestDaemon::start().await;
-
-    daemon
-        .send(&Request::Record(RecordCommandRequest {
-            command: "cargo build --release".into(),
-            exit_code: 0,
-            stderr: None,
-            cwd: "/home/user/project".into(),
-            duration_ms: Some(5000),
-        }))
-        .await;
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "cargo".into(),
-        cursor_pos: 5,
-        context: RequestContext {
-            cwd: "/home/user/project".into(),
-            last_command: None,
-            last_exit_code: Some(0),
-            last_stderr: None,
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let resp = daemon.send(&req).await;
-    match resp {
-        Response::Suggest(s) => {
-            assert!(
-                !s.suggestions.is_empty(),
-                "should get local suggestions even with AI disabled"
-            );
-            assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source != SuggestionSource::Ai),
-                "no suggestion should come from AI when disabled"
-            );
-            let has_local = s.suggestions.iter().any(|sg| {
-                sg.source == SuggestionSource::History || sg.source == SuggestionSource::Specs
-            });
-            assert!(has_local, "should have history or specs suggestions");
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_ai_timeout_returns_local_suggestions() {
-    let mut config = AwenConfig::default();
-    config.ai.enabled = true;
-    config.ai.features.completion = true;
-    config.ai.features.error_recovery = true;
-    config.ai.debounce_ms = 0;
-    config.ai.timeout_ms = 500;
-    config.context.repo_detect = false;
-    config.context.git_context = false;
-
-    let provider: Arc<dyn AiProvider> = Arc::new(SlowMockProvider);
-    let daemon = TestDaemon::start_with_ai(config, provider).await;
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "git ch".into(),
-        cursor_pos: 6,
-        context: RequestContext {
-            cwd: "/home/user/project".into(),
-            last_command: None,
-            last_exit_code: Some(0),
-            last_stderr: None,
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let start = std::time::Instant::now();
-    let resp = daemon.send(&req).await;
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "response should arrive within 1s despite slow AI (took {:?})",
-        elapsed
-    );
-
-    match resp {
-        Response::Suggest(s) => {
-            assert!(
-                !s.suggestions.is_empty(),
-                "should still get local suggestions when AI times out"
-            );
-            let has_specs = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Specs);
-            assert!(
-                has_specs,
-                "should have specs suggestions for 'git ch', got: {:?}",
-                s.suggestions
-                    .iter()
-                    .map(|sg| &sg.source)
-                    .collect::<Vec<_>>()
-            );
-            let has_ai = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Ai);
-            assert!(!has_ai, "AI suggestion should not be present (timed out)");
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-// ============================================================
 // AI merge + debounce E2E tests
 // ============================================================
 
 #[tokio::test]
 async fn test_ai_suggestion_merged_into_response() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -987,20 +754,15 @@ async fn test_ai_suggestion_merged_into_response() {
     let resp = daemon.send(&req).await;
     match resp {
         Response::Suggest(s) => {
-            let ai_suggestions: Vec<_> = s
-                .suggestions
-                .iter()
-                .filter(|sg| sg.source == SuggestionSource::Ai)
-                .collect();
-            assert!(
-                !ai_suggestions.is_empty(),
-                "should have AI suggestion merged into response, got sources: {:?}",
-                s.suggestions.iter().map(|sg| sg.source).collect::<Vec<_>>()
+            assert_eq!(
+                s.suggestions.len(),
+                1,
+                "AI ghost is exactly one full command"
             );
             assert!(
-                ai_suggestions[0].text.contains("pods"),
+                s.suggestions[0].text.contains("pods"),
                 "AI suggestion should contain mock completion, got: {}",
-                ai_suggestions[0].text
+                s.suggestions[0].text
             );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
@@ -1011,7 +773,7 @@ async fn test_ai_suggestion_merged_into_response() {
 
 #[tokio::test]
 async fn test_ai_debounce_skips_second_request() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1045,12 +807,7 @@ async fn test_ai_debounce_skips_second_request() {
     let resp1 = daemon.send(&make_req("myapp deploy")).await;
     match &resp1 {
         Response::Suggest(s) => {
-            assert!(
-                s.suggestions
-                    .iter()
-                    .any(|sg| sg.source == SuggestionSource::Ai),
-                "first request should trigger AI"
-            );
+            assert_eq!(s.suggestions.len(), 1, "first request should trigger AI");
         }
         other => panic!("expected Suggest, got: {other:?}"),
     }
@@ -1064,9 +821,7 @@ async fn test_ai_debounce_skips_second_request() {
     match &resp2 {
         Response::Suggest(s) => {
             assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source != SuggestionSource::Ai),
+                s.suggestions.is_empty(),
                 "second request within debounce window should NOT have AI suggestion"
             );
         }
@@ -1087,7 +842,7 @@ async fn test_ai_debounce_skips_second_request() {
 
 #[tokio::test]
 async fn test_skip_ai_returns_local_only() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1120,11 +875,8 @@ async fn test_skip_ai_returns_local_only() {
     match resp {
         Response::Suggest(s) => {
             assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source != SuggestionSource::Ai),
-                "skip_ai=true should not include AI suggestions, got: {:?}",
-                s.suggestions.iter().map(|sg| sg.source).collect::<Vec<_>>()
+                s.suggestions.is_empty(),
+                "skip_ai=true should return no suggestions when AI is the sole producer"
             );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
@@ -1140,7 +892,7 @@ async fn test_skip_ai_returns_local_only() {
 
 #[tokio::test]
 async fn test_skip_ai_fast_response_with_slow_provider() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1181,10 +933,8 @@ async fn test_skip_ai_fast_response_with_slow_provider() {
     match resp {
         Response::Suggest(s) => {
             assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source != SuggestionSource::Ai),
-                "skip_ai=true should not have AI suggestions"
+                s.suggestions.is_empty(),
+                "skip_ai=true should return no suggestions"
             );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
@@ -1195,7 +945,7 @@ async fn test_skip_ai_fast_response_with_slow_provider() {
 
 #[tokio::test]
 async fn test_skip_ai_false_still_calls_ai() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1227,14 +977,10 @@ async fn test_skip_ai_false_still_calls_ai() {
     let resp = daemon.send(&req).await;
     match resp {
         Response::Suggest(s) => {
-            let has_ai = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Ai);
-            assert!(
-                has_ai,
-                "skip_ai=false should include AI suggestions, got: {:?}",
-                s.suggestions.iter().map(|sg| sg.source).collect::<Vec<_>>()
+            assert_eq!(
+                s.suggestions.len(),
+                1,
+                "AI ghost is exactly one full command"
             );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
@@ -1250,7 +996,7 @@ async fn test_skip_ai_false_still_calls_ai() {
 
 #[tokio::test]
 async fn test_skip_ai_false_risk_warning_still_skips_ai() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1284,9 +1030,7 @@ async fn test_skip_ai_false_risk_warning_still_skips_ai() {
         Response::Suggest(s) => {
             assert!(s.warning.is_some(), "should still detect risk warning");
             assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source != SuggestionSource::Ai),
+                s.suggestions.is_empty(),
                 "AI should be skipped when risk warning is present"
             );
         }
@@ -1301,152 +1045,13 @@ async fn test_skip_ai_false_risk_warning_still_skips_ai() {
     daemon.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_skip_ai_false_high_confidence_local_skips_ai() {
-    let mut config = AwenConfig::default();
-    config.ai.enabled = true;
-    config.ai.features.completion = true;
-    config.ai.features.error_recovery = true;
-    config.ai.debounce_ms = 0;
-    config.context.repo_detect = false;
-    config.context.git_context = false;
-
-    let provider = Arc::new(FastMockProvider::new());
-    let provider_clone: Arc<dyn AiProvider> = provider.clone();
-    let daemon = TestDaemon::start_with_ai(config, provider_clone).await;
-
-    for _ in 0..10 {
-        daemon
-            .send(&Request::Record(RecordCommandRequest {
-                command: "git checkout main".into(),
-                exit_code: 0,
-                stderr: None,
-                cwd: "/home/user/project".into(),
-                duration_ms: None,
-            }))
-            .await;
-    }
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "git checkout main".into(),
-        cursor_pos: 17,
-        context: RequestContext {
-            cwd: "/home/user/project".into(),
-            last_command: None,
-            last_exit_code: Some(0),
-            last_stderr: None,
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let resp = daemon.send(&req).await;
-    match resp {
-        Response::Suggest(s) => {
-            let max_confidence = s
-                .suggestions
-                .iter()
-                .map(|sg| sg.confidence)
-                .fold(0.0_f64, f64::max);
-            if max_confidence >= 0.9 {
-                assert!(
-                    s.suggestions
-                        .iter()
-                        .all(|sg| sg.source != SuggestionSource::Ai),
-                    "AI should be skipped when local confidence >= 0.9"
-                );
-                assert_eq!(
-                    provider.calls(),
-                    0,
-                    "AI should not be called when local confidence is high"
-                );
-            }
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
 // ============================================================
 // AI-as-fallback E2E tests
 // ============================================================
 
 #[tokio::test]
-async fn test_ai_not_called_when_local_sufficient() {
-    let mut config = AwenConfig::default();
-    config.ai.enabled = true;
-    config.ai.features.completion = true;
-    config.ai.features.error_recovery = true;
-    config.ai.debounce_ms = 0;
-    config.context.repo_detect = false;
-    config.context.git_context = false;
-
-    let provider = Arc::new(FastMockProvider::new());
-    let provider_clone: Arc<dyn AiProvider> = provider.clone();
-    let daemon = TestDaemon::start_with_ai(config, provider_clone).await;
-
-    for _ in 0..5 {
-        daemon
-            .send(&Request::Record(RecordCommandRequest {
-                command: "git commit -m 'fix'".into(),
-                exit_code: 0,
-                stderr: None,
-                cwd: "/tmp".into(),
-                duration_ms: None,
-            }))
-            .await;
-    }
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "git co".into(),
-        cursor_pos: 6,
-        context: RequestContext {
-            cwd: "/tmp".into(),
-            last_command: None,
-            last_exit_code: Some(0),
-            last_stderr: None,
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let resp = daemon.send(&req).await;
-    match resp {
-        Response::Suggest(s) => {
-            assert!(
-                !s.suggestions.is_empty(),
-                "should have local suggestions for 'git co'"
-            );
-            assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source != SuggestionSource::Ai),
-                "AI should not be called when local has sufficient results"
-            );
-            assert_eq!(
-                provider.calls(),
-                0,
-                "AI provider should not be called when local candidates are sufficient"
-            );
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
 async fn test_ai_called_when_local_insufficient() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1480,13 +1085,13 @@ async fn test_ai_called_when_local_insufficient() {
         Response::Suggest(s) => {
             assert!(
                 provider.calls() > 0,
-                "AI should be called when local candidates are insufficient"
+                "AI should be called for eligible input"
             );
-            let has_ai = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Ai);
-            assert!(has_ai, "response should contain AI suggestion");
+            assert_eq!(
+                s.suggestions.len(),
+                1,
+                "AI ghost is exactly one full command"
+            );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
     }
@@ -1496,7 +1101,7 @@ async fn test_ai_called_when_local_insufficient() {
 
 #[tokio::test]
 async fn test_ai_error_recovery_when_failure_unmatched() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1532,64 +1137,10 @@ async fn test_ai_error_recovery_when_failure_unmatched() {
                 provider.calls() > 0,
                 "AI should be called for error recovery when local patterns miss"
             );
-            let has_ai = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Ai);
-            assert!(
-                has_ai,
-                "should have AI recovery suggestion for unmatched error"
-            );
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_ai_not_called_when_local_failure_pattern_matches() {
-    let mut config = AwenConfig::default();
-    config.ai.enabled = true;
-    config.ai.features.completion = true;
-    config.ai.features.error_recovery = true;
-    config.ai.debounce_ms = 0;
-    config.context.repo_detect = false;
-    config.context.git_context = false;
-
-    let provider = Arc::new(FastMockProvider::new());
-    let provider_clone: Arc<dyn AiProvider> = provider.clone();
-    let daemon = TestDaemon::start_with_ai(config, provider_clone).await;
-
-    let req = Request::Suggest(SuggestRequest {
-        input: "".into(),
-        cursor_pos: 0,
-        context: RequestContext {
-            cwd: "/tmp".into(),
-            last_command: Some("ripgrep".into()),
-            last_exit_code: Some(127),
-            last_stderr: Some("zsh: command not found: ripgrep".into()),
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: false,
-    });
-
-    let resp = daemon.send(&req).await;
-    match resp {
-        Response::Suggest(s) => {
-            let has_failure = s
-                .suggestions
-                .iter()
-                .any(|sg| sg.source == SuggestionSource::Failure);
-            assert!(has_failure, "should have local failure recovery suggestion");
             assert_eq!(
-                provider.calls(),
-                0,
-                "AI should not be called when local failure pattern matches"
+                s.suggestions.len(),
+                1,
+                "AI ghost is exactly one full command"
             );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
@@ -1600,7 +1151,7 @@ async fn test_ai_not_called_when_local_failure_pattern_matches() {
 
 #[tokio::test]
 async fn test_need_ai_signal_in_phase1_response() {
-    let mut config = AwenConfig::default();
+    let mut config = AwpfelConfig::default();
     config.ai.enabled = true;
     config.ai.features.completion = true;
     config.ai.features.error_recovery = true;
@@ -1612,7 +1163,7 @@ async fn test_need_ai_signal_in_phase1_response() {
     let provider_clone: Arc<dyn AiProvider> = provider.clone();
     let daemon = TestDaemon::start_with_ai(config, provider_clone).await;
 
-    // Unknown command: local insufficient → need_ai should be true
+    // Unknown command: AI is the sole producer → need_ai is true
     let req = Request::Suggest(SuggestRequest {
         input: "myapp deploy".into(),
         cursor_pos: 12,
@@ -1635,14 +1186,14 @@ async fn test_need_ai_signal_in_phase1_response() {
         Response::Suggest(s) => {
             assert!(
                 s.need_ai,
-                "need_ai should be true when local candidates are insufficient"
+                "need_ai should be true when AI is the sole producer"
             );
             assert_eq!(provider.calls(), 0, "skip_ai=true should not call AI");
         }
         other => panic!("expected Suggest response, got: {other:?}"),
     }
 
-    // Known command with specs: local sufficient → need_ai should be false
+    // Known command: local never satisfies ghost demand → need_ai is still true
     let req2 = Request::Suggest(SuggestRequest {
         input: "git ".into(),
         cursor_pos: 4,
@@ -1664,8 +1215,273 @@ async fn test_need_ai_signal_in_phase1_response() {
     match resp2 {
         Response::Suggest(s) => {
             assert!(
-                !s.need_ai,
-                "need_ai should be false when local candidates are sufficient"
+                s.need_ai,
+                "need_ai should be true even for known commands: AI is the sole producer of ghost suggestions"
+            );
+        }
+        other => panic!("expected Suggest response, got: {other:?}"),
+    }
+
+    daemon.shutdown().await;
+}
+
+// ============================================================
+// AI-first ghost completion E2E tests
+// ============================================================
+
+#[tokio::test]
+async fn test_ai_called_even_with_exact_history_match() {
+    let mut config = AwpfelConfig::default();
+    config.ai.enabled = true;
+    config.ai.features.completion = true;
+    config.ai.features.error_recovery = true;
+    config.ai.debounce_ms = 0;
+    config.context.repo_detect = false;
+    config.context.git_context = false;
+
+    let provider = Arc::new(FastMockProvider::new());
+    let provider_clone: Arc<dyn AiProvider> = provider.clone();
+    let daemon = TestDaemon::start_with_ai(config, provider_clone).await;
+
+    for _ in 0..5 {
+        daemon
+            .send(&Request::Record(RecordCommandRequest {
+                command: "git checkout main".into(),
+                exit_code: 0,
+                stderr: None,
+                cwd: "/home/user/project".into(),
+                duration_ms: None,
+            }))
+            .await;
+    }
+
+    let req = Request::Suggest(SuggestRequest {
+        input: "git checkout main".into(),
+        cursor_pos: 17,
+        context: RequestContext {
+            cwd: "/home/user/project".into(),
+            last_command: None,
+            last_exit_code: Some(0),
+            last_stderr: None,
+            git_branch: None,
+            git_status: None,
+            session_commands: vec![],
+            env_hints: vec![],
+        },
+        timestamp: None,
+        skip_ai: false,
+    });
+
+    let resp = daemon.send(&req).await;
+    match resp {
+        Response::Suggest(s) => {
+            assert_eq!(
+                provider.calls(),
+                1,
+                "AI must be called even when history contains an exact match"
+            );
+            assert_eq!(
+                s.suggestions.len(),
+                1,
+                "AI ghost is exactly one full command"
+            );
+        }
+        other => panic!("expected Suggest response, got: {other:?}"),
+    }
+
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_history_context_in_ai_prompt() {
+    let mut config = AwpfelConfig::default();
+    config.ai.enabled = true;
+    config.ai.features.completion = true;
+    config.ai.features.error_recovery = true;
+    config.ai.debounce_ms = 0;
+    config.context.repo_detect = false;
+    config.context.git_context = false;
+
+    let provider = Arc::new(CapturingProvider::new("kubectl get pods --all-namespaces"));
+    let provider_clone: Arc<dyn AiProvider> = provider.clone();
+    let daemon = TestDaemon::start_with_ai(config, provider_clone).await;
+
+    for cmd in [
+        "myapp deploy alpha-one",
+        "myapp deploy alpha-two",
+        "myapp deploy alpha-three",
+    ] {
+        daemon
+            .send(&Request::Record(RecordCommandRequest {
+                command: cmd.into(),
+                exit_code: 0,
+                stderr: None,
+                cwd: "/home/user/project".into(),
+                duration_ms: None,
+            }))
+            .await;
+    }
+
+    // NONEMPTY and UNRELATED per-shell session list: no fallback can mask a
+    // missed DB retrieval. The recorded DB command must reach the prompt.
+    let req = Request::Suggest(SuggestRequest {
+        input: "myapp deploy".into(),
+        cursor_pos: 12,
+        context: RequestContext {
+            cwd: "/home/user/project".into(),
+            last_command: None,
+            last_exit_code: Some(0),
+            last_stderr: None,
+            git_branch: None,
+            git_status: None,
+            session_commands: vec!["ls -la /tmp".into(), "echo unrelated-shell-context".into()],
+            env_hints: vec![],
+        },
+        timestamp: None,
+        skip_ai: false,
+    });
+
+    let resp = daemon.send(&req).await;
+    match resp {
+        Response::Suggest(_) => {}
+        other => panic!("expected Suggest response, got: {other:?}"),
+    }
+
+    let prompt = provider
+        .prompt()
+        .expect("AI provider should have been called");
+    // Assert the retrieved DB command itself reaches the model prompt, even
+    // though the per-shell session list is nonempty and unrelated.
+    assert!(
+        prompt.contains("myapp deploy alpha-three"),
+        "AI prompt should include the DB-matched history command"
+    );
+
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_completion_full_command_nonprefix() {
+    let mut config = AwpfelConfig::default();
+    config.ai.enabled = true;
+    config.ai.features.completion = true;
+    config.ai.features.error_recovery = true;
+    config.ai.debounce_ms = 0;
+    config.context.repo_detect = false;
+    config.context.git_context = false;
+
+    let provider = Arc::new(CapturingProvider::new("kubectl get pods --all-namespaces"));
+    let provider_clone: Arc<dyn AiProvider> = provider.clone();
+    let daemon = TestDaemon::start_with_ai(config, provider_clone).await;
+
+    let req = Request::Suggest(SuggestRequest {
+        input: "myapp deploy".into(),
+        cursor_pos: 12,
+        context: RequestContext {
+            cwd: "/home/user/project".into(),
+            last_command: None,
+            last_exit_code: Some(0),
+            last_stderr: None,
+            git_branch: None,
+            git_status: None,
+            session_commands: vec![],
+            env_hints: vec![],
+        },
+        timestamp: None,
+        skip_ai: false,
+    });
+
+    let resp = daemon.send(&req).await;
+    match resp {
+        Response::Suggest(s) => {
+            assert_eq!(
+                s.suggestions.len(),
+                1,
+                "AI ghost is exactly one full command"
+            );
+            assert!(
+                s.suggestions[0].text.contains("kubectl"),
+                "AI ghost should carry the full command, got: {}",
+                s.suggestions[0].text
+            );
+        }
+        other => panic!("expected Suggest response, got: {other:?}"),
+    }
+
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_ai_failure_returns_no_ghost() {
+    let mut config = AwpfelConfig::default();
+    config.ai.enabled = true;
+    config.ai.features.completion = true;
+    config.ai.features.error_recovery = true;
+    config.ai.debounce_ms = 0;
+    config.context.repo_detect = false;
+    config.context.git_context = false;
+
+    let provider: Arc<dyn AiProvider> = Arc::new(FailingProvider);
+    let daemon = TestDaemon::start_with_ai(config, provider).await;
+
+    let req = Request::Suggest(SuggestRequest {
+        input: "myapp deploy".into(),
+        cursor_pos: 12,
+        context: RequestContext {
+            cwd: "/home/user/project".into(),
+            last_command: None,
+            last_exit_code: Some(0),
+            last_stderr: None,
+            git_branch: None,
+            git_status: None,
+            session_commands: vec![],
+            env_hints: vec![],
+        },
+        timestamp: None,
+        skip_ai: false,
+    });
+
+    let resp = daemon.send(&req).await;
+    match resp {
+        Response::Suggest(s) => {
+            assert!(
+                s.suggestions.is_empty(),
+                "AI failure should yield no ghost suggestions"
+            );
+        }
+        other => panic!("expected Suggest response, got: {other:?}"),
+    }
+
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_ai_disabled_returns_no_ghost() {
+    let daemon = TestDaemon::start().await;
+
+    let req = Request::Suggest(SuggestRequest {
+        input: "git checkout".into(),
+        cursor_pos: 12,
+        context: RequestContext {
+            cwd: "/home/user/project".into(),
+            last_command: None,
+            last_exit_code: Some(0),
+            last_stderr: None,
+            git_branch: None,
+            git_status: None,
+            session_commands: vec![],
+            env_hints: vec![],
+        },
+        timestamp: None,
+        skip_ai: false,
+    });
+
+    let resp = daemon.send(&req).await;
+    match resp {
+        Response::Suggest(s) => {
+            assert!(
+                s.suggestions.is_empty(),
+                "AI-disabled daemon should produce no ghost suggestions"
             );
         }
         other => panic!("expected Suggest response, got: {other:?}"),
@@ -1784,174 +1600,29 @@ async fn test_nl_generate_with_ai_provider() {
     daemon.shutdown().await;
 }
 
-// ============================================================
-// Filesystem Layer E2E
-// ============================================================
-
 #[tokio::test]
-async fn test_filesystem_cd_only_directories() {
-    let daemon = TestDaemon::start().await;
-    let cwd = tempfile::tempdir().unwrap();
-    std::fs::create_dir(cwd.path().join("src")).unwrap();
-    std::fs::create_dir(cwd.path().join("tests")).unwrap();
-    std::fs::write(cwd.path().join("main.rs"), "").unwrap();
-
-    let resp = daemon
-        .send(&Request::Suggest(SuggestRequest {
-            input: "cd ".into(),
-            cursor_pos: 3,
-            context: RequestContext {
-                cwd: cwd.path().to_string_lossy().into(),
-                last_command: None,
-                last_exit_code: None,
-                last_stderr: None,
-                git_branch: None,
-                git_status: None,
-                session_commands: vec![],
-                env_hints: vec![],
-            },
-            timestamp: None,
-            skip_ai: true,
-        }))
-        .await;
-
-    match resp {
-        Response::Suggest(s) => {
-            let fs_items: Vec<_> = s
-                .suggestions
-                .iter()
-                .filter(|sg| sg.source == SuggestionSource::Filesystem)
-                .collect();
-            assert!(
-                !fs_items.is_empty(),
-                "cd should have filesystem suggestions"
-            );
-            assert!(
-                fs_items.iter().all(|sg| sg.text.ends_with('/')),
-                "cd filesystem suggestions should be directories"
-            );
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_filesystem_cat_only_files() {
-    let daemon = TestDaemon::start().await;
-    let cwd = tempfile::tempdir().unwrap();
-    std::fs::create_dir(cwd.path().join("src")).unwrap();
-    std::fs::write(cwd.path().join("main.rs"), "").unwrap();
-    std::fs::write(cwd.path().join("lib.rs"), "").unwrap();
-
-    let resp = daemon
-        .send(&Request::Suggest(SuggestRequest {
-            input: "cat ".into(),
-            cursor_pos: 4,
-            context: RequestContext {
-                cwd: cwd.path().to_string_lossy().into(),
-                last_command: None,
-                last_exit_code: None,
-                last_stderr: None,
-                git_branch: None,
-                git_status: None,
-                session_commands: vec![],
-                env_hints: vec![],
-            },
-            timestamp: None,
-            skip_ai: true,
-        }))
-        .await;
-
-    match resp {
-        Response::Suggest(s) => {
-            let fs_items: Vec<_> = s
-                .suggestions
-                .iter()
-                .filter(|sg| sg.source == SuggestionSource::Filesystem)
-                .collect();
-            assert!(
-                !fs_items.is_empty(),
-                "cat should have filesystem suggestions"
-            );
-            assert!(
-                fs_items.iter().all(|sg| !sg.text.ends_with('/')),
-                "cat filesystem suggestions should be files, not directories"
-            );
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_filesystem_sensitive_paths_hidden() {
-    let daemon = TestDaemon::start().await;
-    let cwd = tempfile::tempdir().unwrap();
-    std::fs::create_dir(cwd.path().join("src")).unwrap();
-    std::fs::create_dir(cwd.path().join(".ssh")).unwrap();
-    std::fs::write(cwd.path().join(".env"), "SECRET=x").unwrap();
-    std::fs::create_dir(cwd.path().join(".git")).unwrap();
-
-    let resp = daemon
-        .send(&Request::Suggest(SuggestRequest {
-            input: "cd ".into(),
-            cursor_pos: 3,
-            context: RequestContext {
-                cwd: cwd.path().to_string_lossy().into(),
-                last_command: None,
-                last_exit_code: None,
-                last_stderr: None,
-                git_branch: None,
-                git_status: None,
-                session_commands: vec![],
-                env_hints: vec![],
-            },
-            timestamp: None,
-            skip_ai: true,
-        }))
-        .await;
-
-    match resp {
-        Response::Suggest(s) => {
-            let fs_items: Vec<_> = s
-                .suggestions
-                .iter()
-                .filter(|sg| sg.source == SuggestionSource::Filesystem)
-                .collect();
-            assert!(
-                !fs_items.is_empty(),
-                "cd should have filesystem suggestions for src/"
-            );
-            for item in &fs_items {
-                assert!(!item.text.contains(".ssh"), "should not suggest .ssh");
-                assert!(!item.text.contains(".env"), "should not suggest .env");
-                assert!(!item.text.contains(".git"), "should not suggest .git");
-            }
-        }
-        other => panic!("expected Suggest response, got: {other:?}"),
-    }
-
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_filesystem_disabled_config() {
+async fn test_nl_respects_configured_budget() {
+    // Model consumer bug: a forced large output reserve overflowed small
+    // context windows. With a 256-token configured budget inside a 4096
+    // window, the route must succeed; a max(4096) floor would fail.
     let mut config = test_config();
-    config.filesystem.enabled = false;
+    config.ai.enabled = true;
+    config.ai.max_tokens = 256;
+    config.ai.features.completion = true;
+    config.ai.features.error_recovery = true;
+    config.ai.features.nl_generation = true;
+    config.ai.timeout_ms = 5000;
 
-    let daemon = TestDaemon::start_with_config_and_ai(config, None).await;
-    let cwd = tempfile::tempdir().unwrap();
-    std::fs::create_dir(cwd.path().join("src")).unwrap();
+    let provider: Arc<dyn AiProvider> = Arc::new(SmallBudgetProvider {
+        context_window: 4096,
+    });
+    let daemon = TestDaemon::start_with_ai(config, provider).await;
 
     let resp = daemon
-        .send(&Request::Suggest(SuggestRequest {
-            input: "cd ".into(),
-            cursor_pos: 3,
+        .send(&Request::NlGenerate(NlGenerateRequest {
+            query: "get all pods across namespaces".into(),
             context: RequestContext {
-                cwd: cwd.path().to_string_lossy().into(),
+                cwd: "/tmp".into(),
                 last_command: None,
                 last_exit_code: None,
                 last_stderr: None,
@@ -1961,88 +1632,61 @@ async fn test_filesystem_disabled_config() {
                 env_hints: vec![],
             },
             timestamp: None,
-            skip_ai: true,
         }))
         .await;
 
     match resp {
-        Response::Suggest(s) => {
-            assert!(
-                s.suggestions
-                    .iter()
-                    .all(|sg| sg.source != SuggestionSource::Filesystem),
-                "filesystem suggestions should not appear when disabled"
+        Response::NlGenerate(r) => {
+            assert_eq!(
+                r.command,
+                Some("kubectl get pods --all-namespaces".to_string()),
+                "small-budget model should produce a command with the configured reserve"
             );
         }
-        other => panic!("expected Suggest response, got: {other:?}"),
+        other => panic!("expected NlGenerate response, got: {other:?}"),
     }
 
     daemon.shutdown().await;
 }
 
 #[tokio::test]
-async fn test_sequence_prediction_boost() {
-    let daemon = TestDaemon::start().await;
+async fn test_nl_failure_returns_none() {
+    let mut config = test_config();
+    config.ai.enabled = true;
+    config.ai.features.completion = true;
+    config.ai.features.error_recovery = true;
+    config.ai.features.nl_generation = true;
+    config.ai.timeout_ms = 5000;
 
-    for _ in 0..5 {
-        daemon
-            .send(&Request::Record(RecordCommandRequest {
-                command: "git add .".into(),
-                exit_code: 0,
-                stderr: None,
-                cwd: "/project".into(),
-                duration_ms: None,
-            }))
-            .await;
-        daemon
-            .send(&Request::Record(RecordCommandRequest {
-                command: "git commit -m 'test'".into(),
-                exit_code: 0,
-                stderr: None,
-                cwd: "/project".into(),
-                duration_ms: None,
-            }))
-            .await;
-    }
+    let provider: Arc<dyn AiProvider> = Arc::new(FailingProvider);
+    let daemon = TestDaemon::start_with_ai(config, provider).await;
 
-    daemon
-        .send(&Request::Record(RecordCommandRequest {
-            command: "git push".into(),
-            exit_code: 0,
-            stderr: None,
-            cwd: "/project".into(),
-            duration_ms: None,
+    let resp = daemon
+        .send(&Request::NlGenerate(NlGenerateRequest {
+            query: "get all pods across namespaces".into(),
+            context: RequestContext {
+                cwd: "/tmp".into(),
+                last_command: None,
+                last_exit_code: None,
+                last_stderr: None,
+                git_branch: None,
+                git_status: None,
+                session_commands: vec![],
+                env_hints: vec![],
+            },
+            timestamp: None,
         }))
         .await;
 
-    let req = Request::Suggest(SuggestRequest {
-        input: "".into(),
-        cursor_pos: 0,
-        context: RequestContext {
-            cwd: "/project".into(),
-            last_command: Some("git add .".into()),
-            last_exit_code: Some(0),
-            last_stderr: None,
-            git_branch: None,
-            git_status: None,
-            session_commands: vec![],
-            env_hints: vec![],
-        },
-        timestamp: None,
-        skip_ai: true,
-    });
-
-    let resp = daemon.send(&req).await;
     match resp {
-        Response::Suggest(s) => {
-            assert!(!s.suggestions.is_empty(), "should have suggestions");
+        Response::NlGenerate(r) => {
             assert!(
-                s.suggestions[0].text.contains("git commit"),
-                "sequenced 'git commit' should rank first after 'git add', got: {:?}",
-                s.suggestions.iter().map(|sg| &sg.text).collect::<Vec<_>>()
+                r.command.is_none(),
+                "failed AI should yield no command, got: {:?}",
+                r.command
             );
         }
-        other => panic!("expected Suggest response, got: {other:?}"),
+        other => panic!("expected NlGenerate response, got: {other:?}"),
     }
 
     daemon.shutdown().await;

@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-REPO="zzf2333/Awen"
+REPO="beeemT/awpfel"
 INSTALL_DIR="${HOME}/.local/bin"
-CONFIG_DIR="${HOME}/.config/awen"
+CONFIG_DIR="${HOME}/.config/awpfel"
 PLUGIN_DIR="${CONFIG_DIR}"
-DATA_DIR="${HOME}/.local/share/awen"
+DATA_DIR="${HOME}/.local/share/awpfel"
 
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -18,27 +18,21 @@ warn()  { printf "${YELLOW}[warn]${RESET} %s\n" "$1"; }
 error() { printf "${RED}[error]${RESET} %s\n" "$1"; }
 
 detect_platform() {
-    OS="$(uname -s)"
-    ARCH="$(uname -m)"
-
-    case "${OS}" in
-        Darwin) OS="apple-darwin" ;;
-        Linux)  OS="unknown-linux-gnu" ;;
-        *)      error "Unsupported OS: ${OS}"; exit 1 ;;
+    # Awpfel releases ship macOS Apple Silicon only (Apfel is macOS-only).
+    case "$(uname -s)" in
+        Darwin) ;;
+        *)      error "Unsupported OS: $(uname -s) (awpfel requires macOS)"; exit 1 ;;
     esac
 
-    case "${ARCH}" in
-        arm64|aarch64) ARCH="aarch64" ;;
-        x86_64|amd64)  ARCH="x86_64" ;;
-        *)             error "Unsupported architecture: ${ARCH}"; exit 1 ;;
+    case "$(uname -m)" in
+        arm64|aarch64) ;;
+        *)             error "Unsupported architecture: $(uname -m) (awpfel requires Apple Silicon)"; exit 1 ;;
     esac
-
-    TARGET="${ARCH}-${OS}"
 }
 
 get_latest_version() {
-    if [ -n "${AWEN_VERSION:-}" ]; then
-        VERSION="${AWEN_VERSION}"
+    if [ -n "${AWPFEL_VERSION:-}" ]; then
+        VERSION="${AWPFEL_VERSION}"
         return
     fi
 
@@ -55,7 +49,7 @@ get_latest_version() {
     fi
 
     if [ -z "${VERSION}" ]; then
-        error "Failed to determine latest version. Set AWEN_VERSION=x.y.z and retry."
+        error "Failed to determine latest version. Set AWPFEL_VERSION=x.y.z and retry."
         exit 1
     fi
 }
@@ -102,18 +96,18 @@ main() {
     detect_platform
     get_latest_version
 
-    TARBALL="awen-${VERSION}-${TARGET}.tar.gz"
+    TARBALL="awpfel_${VERSION}_darwin_arm64.tar.gz"
     BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
     TMPDIR_DL="$(mktemp -d)"
 
     trap 'rm -rf "${TMPDIR_DL}"' EXIT
 
-    info "Downloading Awen v${VERSION} for ${TARGET}..."
+    info "Downloading Awpfel v${VERSION} (darwin arm64)..."
     download "${BASE_URL}/${TARBALL}" "${TMPDIR_DL}/${TARBALL}"
-    download "${BASE_URL}/SHA256SUMS" "${TMPDIR_DL}/SHA256SUMS"
+    download "${BASE_URL}/checksums.txt" "${TMPDIR_DL}/checksums.txt"
 
     info "Verifying checksum..."
-    if ! (cd "${TMPDIR_DL}" && verify_checksum "${TARBALL}" "SHA256SUMS"); then
+    if ! (cd "${TMPDIR_DL}" && verify_checksum "${TARBALL}" "checksums.txt"); then
         error "Checksum verification failed!"
         exit 1
     fi
@@ -121,62 +115,46 @@ main() {
     info "Extracting..."
     tar xzf "${TMPDIR_DL}/${TARBALL}" -C "${TMPDIR_DL}"
 
-    EXTRACTED="${TMPDIR_DL}/awen-${VERSION}-${TARGET}"
+    EXTRACTED="${TMPDIR_DL}"
 
     # Install binary
-    info "Installing binary to ${INSTALL_DIR}/awen..."
+    info "Installing binary to ${INSTALL_DIR}/awpfel..."
     mkdir -p "${INSTALL_DIR}"
-    cp "${EXTRACTED}/awen" "${INSTALL_DIR}/awen"
-    chmod +x "${INSTALL_DIR}/awen"
+    cp "${EXTRACTED}/awpfel" "${INSTALL_DIR}/awpfel"
+    chmod +x "${INSTALL_DIR}/awpfel"
 
     # macOS: clear quarantine + codesign
     if [ "$(uname -s)" = "Darwin" ]; then
-        xattr -cr "${INSTALL_DIR}/awen" 2>/dev/null || true
-        codesign -fs - "${INSTALL_DIR}/awen" 2>/dev/null || true
+        xattr -cr "${INSTALL_DIR}/awpfel" 2>/dev/null || true
+        codesign -fs - "${INSTALL_DIR}/awpfel" 2>/dev/null || true
     fi
 
-    # Install plugin
-    info "Installing plugin to ${PLUGIN_DIR}/awen.zsh..."
+    # Install full plugin directory (entry + modules)
+    info "Installing plugin to ${PLUGIN_DIR}/..."
     mkdir -p "${PLUGIN_DIR}"
-    cp "${EXTRACTED}/awen.zsh" "${PLUGIN_DIR}/awen.zsh"
+    for module in awpfel.zsh awpfel-utils.zsh awpfel-render.zsh awpfel-interact.zsh awpfel-communicate.zsh; do
+        cp "${EXTRACTED}/${module}" "${PLUGIN_DIR}/"
+    done
 
-    # Create default config if missing
+    # Create default config if missing (defaults target the managed local Apfel)
     if [ ! -f "${CONFIG_DIR}/config.toml" ]; then
         info "Creating default config at ${CONFIG_DIR}/config.toml..."
-        cat > "${CONFIG_DIR}/config.toml" << 'TOML'
-[ai]
-enabled = true
-base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
-api_key = ""
-debounce_ms = 300
-timeout_ms = 30000
-max_tokens = 1024
-cache_ttl_minutes = 30
-
-[context]
-session_history_size = 20
-stderr_max_chars = 500
-repo_detect = true
-git_context = true
-capture_stderr = true
-
-[ui]
-ghost_text_color = 242
-dropdown_max_items = 8
-hint_style = "above"
-risk_detection = true
-command_explanation = false
-TOML
+        mkdir -p "${CONFIG_DIR}"
+        "${INSTALL_DIR}/awpfel" config > "${CONFIG_DIR}/config.toml" || warn "Could not write default config."
     else
         info "Config already exists, preserving."
+    fi
+
+    # Check for the Apfel CLI (provides the on-device model server)
+    if ! command -v apfel >/dev/null 2>&1; then
+        warn "apfel not found. Install it for on-device AI: brew install beeemT/tap/awpfel"
     fi
 
     # Create data directory
     mkdir -p "${DATA_DIR}"
 
     printf "\n"
-    info "${BOLD}Awen v${VERSION} installed successfully!${RESET}"
+    info "${BOLD}Awpfel v${VERSION} installed successfully!${RESET}"
     printf "\n"
 
     # PATH setup
@@ -188,7 +166,7 @@ TOML
                 info "${INSTALL_DIR} PATH entry already in .zshrc"
             elif ask_yes "Add ${INSTALL_DIR} to PATH in ~/.zshrc?"; then
                 # shellcheck disable=SC2016
-                printf '\n# Added by Awen installer\nexport PATH="${HOME}/.local/bin:${PATH}"\n' >> "${ZSHRC}"
+                printf '\n# Added by Awpfel installer\nexport PATH="${HOME}/.local/bin:${PATH}"\n' >> "${ZSHRC}"
                 info "PATH entry added to ~/.zshrc"
             else
                 warn "Skipped. Add manually: export PATH=\"\${HOME}/.local/bin:\${PATH}\""
@@ -196,43 +174,34 @@ TOML
             ;;
     esac
 
-    # Source plugin in .zshrc
-    ZSHRC="${HOME}/.zshrc"
-    if [ -f "${ZSHRC}" ] && grep -qF "awen.zsh" "${ZSHRC}"; then
-        info "awen.zsh is already sourced in .zshrc"
-    elif ask_yes "Add 'source ~/.config/awen/awen.zsh' to ~/.zshrc?"; then
-        printf '\n# Awen — Terminal Intelligence Layer\nsource %s/awen.zsh\n' "${PLUGIN_DIR}" >> "${ZSHRC}"
-        info "Added to ~/.zshrc"
-    else
-        warn "Skipped. Add manually: source ${PLUGIN_DIR}/awen.zsh"
-    fi
+    # Shell integration is handled by `awpfel setup` (source line + autostart block).
+    "${INSTALL_DIR}/awpfel" setup --yes
 
-    # Optional dependency hints
+    # Required plugin helpers
     if ! command -v jq >/dev/null 2>&1; then
-        warn "jq not found (optional). Install for more robust JSON handling."
+        warn "jq not found. Install jq — the shell plugin needs it."
     fi
     if ! command -v socat >/dev/null 2>&1; then
-        warn "socat not found (optional). Falls back to zsh zsocket."
+        warn "socat not found (falls back to zsh zsocket)."
     fi
 
     printf "\n"
     printf '%sQuick start:%s\n' "${BOLD}" "${RESET}"
-    printf '  Open a new terminal — Awen will start automatically.\n'
-    printf '  awen status   — check daemon status\n'
-    printf '  awen stop     — stop the daemon\n'
-    printf '  awen config   — view configuration\n'
+    printf '  Open a new terminal — Awpfel starts automatically (managed local Apfel).\n'
+    printf '  awpfel status   — check daemon status\n'
+    printf '  awpfel stop     — stop the daemon\n'
+    printf '  awpfel config   — view configuration\n'
     printf '\n'
-    printf '  On first launch, Awen will import your zsh history automatically.\n'
-    printf '  To import manually: awen history import\n'
+    printf '  On first launch, Awpfel imports your zsh history automatically.\n'
+    printf '  To import manually: awpfel history import\n'
     printf '\n'
-    printf 'For AI completions, set your API key in %s/config.toml\n' "${CONFIG_DIR}"
-    printf 'or export AWEN_API_KEY=your-key\n'
+    printf 'AI runs on-device via the managed Apfel backend. No API key needed.\n'
     printf '\n'
     printf '%sTo uninstall:%s\n' "${BOLD}" "${RESET}"
-    printf '  rm ~/.local/bin/awen\n'
-    printf '  rm -rf ~/.config/awen\n'
-    printf '  rm -rf ~/.local/share/awen\n'
-    printf '  # Remove source ~/.config/awen/awen.zsh from ~/.zshrc\n'
+    printf '  awpfel uninstall --yes\n'
+    printf '  rm ~/.local/bin/awpfel\n'
+    printf '  rm -rf ~/.config/awpfel\n'
+    printf '  rm -rf ~/.local/share/awpfel\n'
 }
 
 main

@@ -1,12 +1,10 @@
-use crate::config::{self, AwenConfig};
+use crate::config::{self, AwpfelConfig};
 use crate::context::ContextEngine;
 use crate::layer::ai;
 use crate::layer::failure::FailureLayer;
-use crate::layer::filesystem::FilesystemLayer;
 use crate::layer::history::HistoryLayer;
 use crate::layer::risk::RiskLayer;
-use crate::layer::specs::SpecsLayer;
-use crate::pipeline::{AiDecision, AiParams, AiTriggerPolicy, Layers, SuggestionPipeline};
+use crate::pipeline::{AiDecision, AiParams, AiTriggerPolicy, SuggestionPipeline};
 use crate::protocol::*;
 
 use std::sync::Arc;
@@ -17,17 +15,15 @@ use tokio::sync::Mutex;
 struct DaemonState {
     context: ContextEngine,
     history: HistoryLayer,
-    specs: SpecsLayer,
     failure: FailureLayer,
     risk: RiskLayer,
-    filesystem: FilesystemLayer,
     ai_provider: Option<Arc<dyn ai::AiProvider>>,
-    config: AwenConfig,
+    config: AwpfelConfig,
     start_time: std::time::Instant,
     last_ai_request_at: Option<std::time::Instant>,
 }
 
-pub async fn run(config: AwenConfig) {
+pub async fn run(config: AwpfelConfig) {
     let paths = DaemonPaths {
         socket: config::socket_path(),
         db: config::history_db_path(),
@@ -44,12 +40,12 @@ pub struct DaemonPaths {
     pub config_dir: std::path::PathBuf,
 }
 
-pub async fn run_on_paths(config: AwenConfig, paths: &DaemonPaths) {
+pub async fn run_on_paths(config: AwpfelConfig, paths: &DaemonPaths) {
     run_on_paths_with_ai(config, paths, None).await;
 }
 
 pub async fn run_on_paths_with_ai(
-    config: AwenConfig,
+    config: AwpfelConfig,
     paths: &DaemonPaths,
     ai_override: Option<Arc<dyn ai::AiProvider>>,
 ) {
@@ -73,26 +69,17 @@ pub async fn run_on_paths_with_ai(
     let need_history_import = history.count() == 0;
     let import_db_path = paths.db.clone();
 
-    let mut specs = SpecsLayer::new();
-    specs.load_builtin_specs();
-    specs.load_user_specs(&paths.config_dir.join("specs"));
-
     let mut failure = FailureLayer::new();
     failure.load_user_patterns(&paths.config_dir.join("failure_patterns.toml"));
-
-    let mut risk = RiskLayer::new();
-    risk.load_user_patterns(&paths.config_dir.join("risk_patterns.toml"));
+    let risk = RiskLayer::new();
 
     let ai_provider = ai_override.or_else(|| ai::create_provider(&config));
-    let filesystem = FilesystemLayer::new(config.filesystem.clone());
 
     let state = Arc::new(Mutex::new(DaemonState {
         context: ContextEngine::new(&config),
         history,
-        specs,
         failure,
         risk,
-        filesystem,
         ai_provider,
         config: config.clone(),
         start_time: std::time::Instant::now(),
@@ -109,7 +96,7 @@ pub async fn run_on_paths_with_ai(
     };
 
     tracing::info!("listening on {}", paths.socket.display());
-    println!("awen daemon running (socket: {})", paths.socket.display());
+    println!("awpfel daemon running (socket: {})", paths.socket.display());
 
     if need_history_import {
         tokio::task::spawn_blocking(move || {
@@ -171,7 +158,7 @@ pub async fn run_on_paths_with_ai(
     }
 
     std::fs::remove_file(&paths.socket).ok();
-    println!("awen daemon stopped");
+    println!("awpfel daemon stopped");
 }
 
 async fn handle_connection(
@@ -225,23 +212,33 @@ async fn process_request(
 }
 
 async fn handle_suggest(req: SuggestRequest, state: &Arc<Mutex<DaemonState>>) -> Response {
-    let (local, ai_params, decision, ui_mode) = {
+    let (signals, ai_params, decision, ui_mode, history_matches) = {
         let mut st = state.lock().await;
 
-        let local = {
+        // Local layers produce only non-ghost UI signals (risk warning, failure
+        // hint). Ghost text comes exclusively from the AI phase.
+        let signals = {
             let st_ref = &mut *st;
-            let mut layers = Layers {
-                history: &st_ref.history,
-                specs: &st_ref.specs,
-                failure: &st_ref.failure,
-                risk: &st_ref.risk,
-                filesystem: &mut st_ref.filesystem,
-                context: &mut st_ref.context,
-                risk_enabled: st_ref.config.ui.risk_detection,
-                filesystem_enabled: st_ref.config.filesystem.enabled,
-            };
-            SuggestionPipeline::collect_local(&mut layers, &req.input, req.cursor_pos, &req.context)
+            SuggestionPipeline::collect_local_signals(
+                &st_ref.failure,
+                &st_ref.risk,
+                &mut st_ref.context,
+                &req.input,
+                &req.context,
+                st_ref.config.ui.risk_detection,
+            )
         };
+
+        // History is AI input, not competing output: matching historical
+        // commands go into the prompt as sanitized, bounded snippets —
+        // untrusted context the model picks from, never user-facing output.
+        let raw_matches = st.history.match_for_prompt(
+            &req.input,
+            &req.context.cwd,
+            req.context.last_command.as_deref(),
+            12,
+        );
+        let history_matches = crate::sanitize::sanitize_history_matches(&raw_matches, 12);
 
         let ai_params = st.ai_provider.clone().map(|provider| AiParams {
             provider,
@@ -251,13 +248,13 @@ async fn handle_suggest(req: SuggestRequest, state: &Arc<Mutex<DaemonState>>) ->
         });
 
         let policy = AiTriggerPolicy::new(&st.config.ai);
-        let decision = policy.evaluate(
-            &req.input,
-            &local,
-            ai_params.is_some(),
-            req.skip_ai,
-            st.last_ai_request_at,
-        );
+        let decision = policy.evaluate(crate::pipeline::AiEligibility {
+            input: &req.input,
+            signals: &signals,
+            ai_available: ai_params.is_some(),
+            skip_ai: req.skip_ai,
+            last_ai_request_at: st.last_ai_request_at,
+        });
 
         if decision == AiDecision::RequestNow {
             st.last_ai_request_at = Some(std::time::Instant::now());
@@ -265,11 +262,18 @@ async fn handle_suggest(req: SuggestRequest, state: &Arc<Mutex<DaemonState>>) ->
 
         let ui_mode = st.config.ui.mode.to_string();
 
-        (local, ai_params, decision, ui_mode)
+        (signals, ai_params, decision, ui_mode, history_matches)
     };
 
-    let mut response =
-        SuggestionPipeline::execute(local, decision, ai_params, &req.input, &req.context).await;
+    let mut response = SuggestionPipeline::execute(
+        signals,
+        decision,
+        ai_params,
+        &req.input,
+        &req.context,
+        &history_matches,
+    )
+    .await;
     response.ui_mode = Some(ui_mode);
 
     Response::Suggest(response)
@@ -280,7 +284,7 @@ async fn handle_nl_generate(req: NlGenerateRequest, state: &Arc<Mutex<DaemonStat
         let state = state.lock().await;
         (
             state.ai_provider.clone(),
-            state.config.ai.max_tokens.max(200),
+            state.config.ai.max_tokens,
             state.config.ai.timeout_ms,
             state.config.context.stderr_max_chars,
             state.config.ui.risk_detection,
@@ -304,7 +308,9 @@ async fn handle_nl_generate(req: NlGenerateRequest, state: &Arc<Mutex<DaemonStat
         });
     };
 
-    if req.query.is_empty() {
+    // Oversized NL queries yield no result rather than a truncated-semantics
+    // call: the shell surfaces empty/error, never a clipped-query command.
+    if req.query.is_empty() || req.query.len() > ai::MAX_INPUT_BYTES {
         return Response::NlGenerate(NlGenerateResponse {
             command: None,
             explanation: None,
@@ -406,7 +412,6 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> Response {
         config: Some(StatusConfig {
             ui_mode: state.config.ui.mode.to_string(),
             ghost_text_color: state.config.ui.ghost_text_color,
-            dropdown_max_items: state.config.ui.dropdown_max_items,
             capture_stderr: state.config.context.capture_stderr,
             stderr_max_chars: state.config.context.stderr_max_chars,
         }),

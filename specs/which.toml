@@ -1,7 +1,0 @@
-[command]
-name = "which"
-description = "Locate a command"
-
-[[command.flags]]
-name = "-a"
-description = "Print all matching executables"

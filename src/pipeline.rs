@@ -1,30 +1,16 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::arbitrator::Arbitrator;
 use crate::config::{AiConfig, AiFeaturesConfig};
 use crate::context::ContextEngine;
 use crate::layer::ai::{self, AiProvider};
 use crate::layer::failure::FailureLayer;
-use crate::layer::filesystem::FilesystemLayer;
-use crate::layer::history::HistoryLayer;
 use crate::layer::risk::RiskLayer;
-use crate::layer::specs::SpecsLayer;
-use crate::protocol::{RequestContext, SuggestResponse, Suggestion};
+use crate::protocol::{Hint, RequestContext, SuggestResponse, Suggestion, Warning};
 
-pub struct Layers<'a> {
-    pub history: &'a HistoryLayer,
-    pub specs: &'a SpecsLayer,
-    pub failure: &'a FailureLayer,
-    pub risk: &'a RiskLayer,
-    pub filesystem: &'a mut FilesystemLayer,
-    pub context: &'a mut ContextEngine,
-    pub risk_enabled: bool,
-    pub filesystem_enabled: bool,
-}
-
-pub struct LocalResult {
-    pub response: SuggestResponse,
+pub struct LocalSignals {
+    pub warning: Option<Warning>,
+    pub hint: Option<Hint>,
     pub has_failure_context: bool,
     pub local_failure_matched: bool,
 }
@@ -44,40 +30,47 @@ pub enum AiDecision {
 }
 
 pub struct AiTriggerPolicy {
-    min_local_candidates: usize,
-    min_local_confidence: f64,
     debounce_ms: u64,
     features: AiFeaturesConfig,
+}
+
+/// Eligibility snapshot for one suggest call: the current input plus the
+/// already-collected local signals (warning/hint/failure context), provider
+/// availability, and debounce state. The policy reads this single snapshot;
+/// callers never pass the underlying fields positionally.
+pub struct AiEligibility<'a> {
+    pub input: &'a str,
+    pub signals: &'a LocalSignals,
+    pub ai_available: bool,
+    pub skip_ai: bool,
+    pub last_ai_request_at: Option<Instant>,
 }
 
 impl AiTriggerPolicy {
     pub fn new(config: &AiConfig) -> Self {
         Self {
-            min_local_candidates: config.min_local_candidates,
-            min_local_confidence: config.min_local_confidence,
             debounce_ms: config.debounce_ms,
             features: config.features.clone(),
         }
     }
 
-    pub fn evaluate(
-        &self,
-        input: &str,
-        local: &LocalResult,
-        ai_available: bool,
-        skip_ai: bool,
-        last_ai_request_at: Option<Instant>,
-    ) -> AiDecision {
-        if !self.ai_is_useful(input, local) {
+    /// Decide whether the async AI phase is eligible.
+    ///
+    /// AI is the sole producer of ghost text, so local match strength never
+    /// gates the decision: any eligible nonempty debounced input triggers a
+    /// call, with relevant history supplied as prompt context instead of
+    /// competing output.
+    pub fn evaluate(&self, e: AiEligibility<'_>) -> AiDecision {
+        if !self.ai_is_useful(e.input, e.signals) {
             return AiDecision::Skip;
         }
-        if !ai_available {
+        if !e.ai_available {
             return AiDecision::Skip;
         }
-        if skip_ai {
+        if e.skip_ai {
             return AiDecision::NeedAiOnly;
         }
-        if let Some(last_at) = last_ai_request_at
+        if let Some(last_at) = e.last_ai_request_at
             && (last_at.elapsed().as_millis() as u64) < self.debounce_ms
         {
             return AiDecision::NeedAiOnly;
@@ -85,175 +78,166 @@ impl AiTriggerPolicy {
         AiDecision::RequestNow
     }
 
-    fn ai_is_useful(&self, input: &str, local: &LocalResult) -> bool {
-        if local.response.warning.is_some() {
+    fn ai_is_useful(&self, input: &str, signals: &LocalSignals) -> bool {
+        // Risk warnings suppress AI even though the warning itself is kept.
+        if signals.warning.is_some() {
             return false;
         }
-        if local.has_failure_context && !local.local_failure_matched {
+        // Error recovery supplements empty-input failure context only through
+        // AI. Normal nonempty completion must not be hijacked by the
+        // error-recovery switch: when the user is typing, completion decides.
+        if signals.has_failure_context && input.is_empty() {
+            if signals.local_failure_matched {
+                return false;
+            }
             return self.features.error_recovery;
         }
         if !self.features.completion {
             return false;
         }
-        if input.len() < 2 {
+        if input.len() < 2 || input.len() > crate::layer::ai::MAX_INPUT_BYTES {
+            // Oversized input: no result rather than a truncated-semantics call.
             return false;
         }
-        let candidate_count = local.response.suggestions.len();
-        let max_confidence = local
-            .response
-            .suggestions
-            .iter()
-            .map(|s| s.confidence)
-            .fold(0.0_f64, f64::max);
-        candidate_count < self.min_local_candidates && max_confidence < self.min_local_confidence
+        if input.chars().any(|c| {
+            c == '\0'
+                || c == '\u{1b}'
+                || c == '\r'
+                || c == '\u{7f}'
+                || c.is_control() && c != '\n' && c != '\t'
+        }) {
+            return false;
+        }
+        true
     }
 }
 
 enum AiTask<'a> {
     ErrorRecovery {
         context: &'a RequestContext,
+        history_matches: &'a [String],
     },
     Completion {
         input: &'a str,
         context: &'a RequestContext,
+        history_matches: &'a [String],
     },
 }
 
 pub struct SuggestionPipeline;
 
 impl SuggestionPipeline {
-    pub fn collect_local(
-        layers: &mut Layers<'_>,
+    /// Collect local non-ghost signals only: risk warning + failure hint.
+    ///
+    /// History is AI prompt context, never ghost output, and the AI phase
+    /// is the sole producer of ghost text.
+    pub fn collect_local_signals(
+        failure: &FailureLayer,
+        risk: &RiskLayer,
+        context: &mut ContextEngine,
         input: &str,
-        cursor_pos: usize,
         req_context: &RequestContext,
-    ) -> LocalResult {
-        if input.is_empty() {
-            let mut suggestions = layers.history.suggest_next(
-                &req_context.cwd,
-                req_context.last_command.as_deref(),
-                10,
-            );
+        risk_enabled: bool,
+    ) -> LocalSignals {
+        context.update_cwd(req_context.cwd.clone());
 
-            let mut hint = None;
-            let local_failure_matched = if let Some(exit_code) = req_context.last_exit_code
-                && exit_code != 0
-                && let Some(stderr) = &req_context.last_stderr
-                && let Some((fail_suggestion, fail_hint)) =
-                    layers.failure.match_failure(stderr, exit_code)
-            {
-                suggestions.insert(0, fail_suggestion);
-                hint = Some(fail_hint);
-                true
-            } else {
-                false
-            };
-
-            let has_failure_context = req_context
-                .last_exit_code
-                .is_some_and(|c| c != 0 && !FailureLayer::is_user_signal(c))
-                && req_context.last_stderr.is_some();
-
-            LocalResult {
-                response: SuggestResponse {
-                    suggestions,
-                    hint,
-                    warning: None,
-                    need_ai: false,
-                    ui_mode: None,
-                },
-                has_failure_context,
-                local_failure_matched,
-            }
+        let mut hint = None;
+        let local_failure_matched = if let Some(exit_code) = req_context.last_exit_code
+            && exit_code != 0
+            && let Some(stderr) = &req_context.last_stderr
+            && let Some(fail_hint) = failure.match_failure(stderr, exit_code)
+        {
+            hint = Some(fail_hint);
+            true
         } else {
-            layers.context.update_cwd(req_context.cwd.clone());
+            false
+        };
 
-            let mut suggestions = Vec::new();
-            suggestions.extend(layers.history.suggest(
-                input,
-                &req_context.cwd,
-                req_context.last_command.as_deref(),
-                10,
-            ));
-            suggestions.extend(layers.specs.suggest(input, cursor_pos));
+        let has_failure_context = req_context
+            .last_exit_code
+            .is_some_and(|c| c != 0 && !FailureLayer::is_user_signal(c))
+            && req_context.last_stderr.is_some();
 
-            if layers.filesystem_enabled {
-                suggestions.extend(layers.filesystem.suggest(input, cursor_pos, req_context));
-            }
+        let warning = if risk_enabled && !input.is_empty() {
+            risk.check(input)
+        } else {
+            None
+        };
 
-            let mut hint = None;
-            let local_failure_matched = if let Some(exit_code) = req_context.last_exit_code
-                && exit_code != 0
-                && let Some(stderr) = &req_context.last_stderr
-                && let Some((fail_suggestion, fail_hint)) =
-                    layers.failure.match_failure(stderr, exit_code)
-            {
-                suggestions.push(fail_suggestion);
-                hint = Some(fail_hint);
-                true
-            } else {
-                false
-            };
-
-            let has_failure_context = req_context
-                .last_exit_code
-                .is_some_and(|c| c != 0 && !FailureLayer::is_user_signal(c))
-                && req_context.last_stderr.is_some();
-
-            let warning = if layers.risk_enabled {
-                layers.risk.check(input)
-            } else {
-                None
-            };
-
-            let response = Arbitrator::arbitrate(suggestions, req_context, hint, warning);
-            LocalResult {
-                response,
-                has_failure_context,
-                local_failure_matched,
-            }
+        LocalSignals {
+            warning,
+            hint,
+            has_failure_context,
+            local_failure_matched,
         }
     }
 
     pub async fn execute(
-        mut local: LocalResult,
+        signals: LocalSignals,
         decision: AiDecision,
         ai_params: Option<AiParams>,
         input: &str,
         context: &RequestContext,
+        history_matches: &[String],
     ) -> SuggestResponse {
-        local.response.need_ai =
-            matches!(decision, AiDecision::RequestNow | AiDecision::NeedAiOnly);
+        let mut response = SuggestResponse {
+            suggestions: Vec::new(),
+            hint: signals.hint,
+            warning: signals.warning,
+            need_ai: matches!(decision, AiDecision::RequestNow | AiDecision::NeedAiOnly),
+            ui_mode: None,
+        };
 
         if decision == AiDecision::RequestNow
             && let Some(ref params) = ai_params
         {
-            let task = if local.has_failure_context && !local.local_failure_matched {
-                AiTask::ErrorRecovery { context }
+            // Failure error-recovery and normal completion share the AI path.
+            // Optional error-recovery never hijacks normal completion: the
+            // task splits on empty-input failure context only; when the user
+            // is typing, completion decides. Local matches never gate AI.
+            let task = if signals.has_failure_context && input.is_empty() {
+                AiTask::ErrorRecovery {
+                    context,
+                    history_matches,
+                }
             } else {
-                AiTask::Completion { input, context }
+                AiTask::Completion {
+                    input,
+                    context,
+                    history_matches,
+                }
             };
 
             if let Some(suggestion) = Self::execute_ai(task, params).await {
-                Arbitrator::merge_ai_suggestion(&mut local.response, suggestion);
+                response.suggestions.push(suggestion);
             }
         }
 
-        local.response
+        response
     }
 
     async fn execute_ai(task: AiTask<'_>, params: &AiParams) -> Option<Suggestion> {
+        // Honor the per-shell context exactly as supplied: an empty
+        // session_commands list stays empty. No server-global recent-command
+        // fallback — cross-shell leakage is worse than a thinner prompt.
         let mut ctx = match &task {
-            AiTask::ErrorRecovery { context } => (*context).clone(),
+            AiTask::ErrorRecovery { context, .. } => (*context).clone(),
             AiTask::Completion { context, .. } => (*context).clone(),
         };
         crate::sanitize::sanitize_request_context(&mut ctx, params.stderr_max_chars);
 
         let (prompt, label) = match &task {
-            AiTask::ErrorRecovery { .. } => {
-                (ai::build_error_recovery_prompt(&ctx), "error recovery")
-            }
-            AiTask::Completion { input, .. } => (ai::build_prompt(input, &ctx), "completion"),
+            AiTask::ErrorRecovery {
+                history_matches, ..
+            } => (
+                ai::build_error_recovery_prompt(&ctx, history_matches),
+                "error recovery",
+            ),
+            AiTask::Completion {
+                input,
+                history_matches,
+                ..
+            } => (ai::build_prompt(input, &ctx, history_matches), "completion"),
         };
 
         tracing::info!("AI {label} started");
@@ -291,6 +275,7 @@ impl SuggestionPipeline {
             }
             Ok(Err(e)) => {
                 tracing::info!("AI {label} error: {e}");
+                // No fabricated fallback: failure/timeout yields no ghost.
                 None
             }
             Err(_) => {
@@ -307,50 +292,9 @@ impl SuggestionPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{SuggestResponse, Suggestion, SuggestionSource, Warning};
-
-    fn make_local(
-        candidate_count: usize,
-        max_confidence: f64,
-        has_warning: bool,
-        has_failure_context: bool,
-        local_failure_matched: bool,
-    ) -> LocalResult {
-        let suggestions: Vec<Suggestion> = (0..candidate_count)
-            .map(|i| {
-                let confidence = if i == 0 { max_confidence } else { 0.0 };
-                Suggestion {
-                    text: format!("cmd{i}"),
-                    source: SuggestionSource::History,
-                    confidence,
-                    description: None,
-                }
-            })
-            .collect();
-        let warning = if has_warning {
-            Some(Warning {
-                text: "dangerous".into(),
-            })
-        } else {
-            None
-        };
-        LocalResult {
-            response: SuggestResponse {
-                suggestions,
-                hint: None,
-                warning,
-                need_ai: false,
-                ui_mode: None,
-            },
-            has_failure_context,
-            local_failure_matched,
-        }
-    }
 
     fn policy() -> AiTriggerPolicy {
         AiTriggerPolicy {
-            min_local_candidates: 2,
-            min_local_confidence: 0.6,
             debounce_ms: 300,
             features: AiFeaturesConfig {
                 error_recovery: true,
@@ -360,140 +304,195 @@ mod tests {
         }
     }
 
-    // --- ai_is_useful tests (ported from daemon.rs) ---
+    struct Case<'a> {
+        input: &'a str,
+        has_failure_context: bool,
+        local_failure_matched: bool,
+        warning: Option<Warning>,
+        ai_available: bool,
+        skip_ai: bool,
+        last_ai_request_at: Option<Instant>,
+    }
+
+    fn decide(p: &AiTriggerPolicy, c: Case<'_>) -> AiDecision {
+        p.evaluate(AiEligibility {
+            input: c.input,
+            signals: &LocalSignals {
+                warning: c.warning,
+                hint: None,
+                has_failure_context: c.has_failure_context,
+                local_failure_matched: c.local_failure_matched,
+            },
+            ai_available: c.ai_available,
+            skip_ai: c.skip_ai,
+            last_ai_request_at: c.last_ai_request_at,
+        })
+    }
+
+    fn base(input: &str) -> Case<'_> {
+        Case {
+            input,
+            has_failure_context: false,
+            local_failure_matched: false,
+            warning: None,
+            ai_available: true,
+            skip_ai: false,
+            last_ai_request_at: None,
+        }
+    }
+
+    fn warn() -> Option<Warning> {
+        Some(Warning {
+            text: "dangerous".into(),
+        })
+    }
+
+    // Nonempty eligible input always requests AI: local match strength never
+    // gates the decision anymore (history is prompt context, not output).
 
     #[test]
     fn warning_blocks_ai() {
         let p = policy();
-        let local = make_local(0, 0.0, true, false, false);
         assert_eq!(
-            p.evaluate("git ch", &local, true, false, None),
+            decide(
+                &p,
+                Case {
+                    input: "git ch",
+                    warning: warn(),
+                    ..base("")
+                },
+            ),
             AiDecision::Skip
         );
     }
 
     #[test]
-    fn error_recovery_triggers_ai() {
+    fn oversized_and_control_input_skips_ai() {
         let p = policy();
-        let local = make_local(0, 0.0, false, true, false);
+        // Oversized input yields no result rather than a changed-semantics call.
+        let big = "x".repeat(crate::layer::ai::MAX_INPUT_BYTES + 1);
         assert_eq!(
-            p.evaluate("", &local, true, false, None),
+            decide(
+                &p,
+                Case {
+                    input: &big,
+                    ..base("")
+                }
+            ),
+            AiDecision::Skip
+        );
+        // Terminal controls before BUFFER yield no ghost.
+        assert_eq!(
+            decide(
+                &p,
+                Case {
+                    input: "ls \x1b[0m",
+                    ..base("")
+                }
+            ),
+            AiDecision::Skip
+        );
+    }
+
+    #[test]
+    fn error_recovery_triggers_ai_without_local_match() {
+        let p = policy();
+        assert_eq!(
+            decide(
+                &p,
+                Case {
+                    has_failure_context: true,
+                    ..base("")
+                },
+            ),
             AiDecision::RequestNow
         );
+        // Nonempty input with failure context is normal completion, never
+        // hijacked by the error-recovery switch.
         assert_eq!(
-            p.evaluate("gi", &local, true, false, None),
+            decide(
+                &p,
+                Case {
+                    input: "gi",
+                    has_failure_context: true,
+                    ..base("")
+                },
+            ),
             AiDecision::RequestNow
         );
     }
 
     #[test]
-    fn error_recovery_local_matched_skips() {
+    fn error_recovery_local_matched_skips_only_empty_input() {
         let p = policy();
-        let local = make_local(1, 0.95, false, true, true);
-        assert_eq!(p.evaluate("", &local, true, false, None), AiDecision::Skip);
+        assert_eq!(
+            decide(
+                &p,
+                Case {
+                    has_failure_context: true,
+                    local_failure_matched: true,
+                    ..base("")
+                },
+            ),
+            AiDecision::Skip
+        );
+        // A locally matched hint does not suppress typing-time completion.
+        assert_eq!(
+            decide(
+                &p,
+                Case {
+                    input: "gi",
+                    has_failure_context: true,
+                    local_failure_matched: true,
+                    ..base("")
+                },
+            ),
+            AiDecision::RequestNow
+        );
     }
 
     #[test]
     fn short_input_no_failure_skips() {
         let p = policy();
-        let local = make_local(0, 0.0, false, false, false);
-        assert_eq!(p.evaluate("g", &local, true, false, None), AiDecision::Skip);
-        assert_eq!(p.evaluate("", &local, true, false, None), AiDecision::Skip);
+        assert_eq!(
+            decide(
+                &p,
+                Case {
+                    input: "g",
+                    ..base("")
+                }
+            ),
+            AiDecision::Skip
+        );
+        assert_eq!(decide(&p, base("")), AiDecision::Skip);
     }
 
     #[test]
-    fn sufficient_count_skips() {
+    fn eligible_input_always_requests_ai() {
         let p = policy();
-        let local1 = make_local(3, 0.3, false, false, false);
-        assert_eq!(
-            p.evaluate("git ch", &local1, true, false, None),
-            AiDecision::Skip
-        );
-        let local2 = make_local(2, 0.1, false, false, false);
-        assert_eq!(
-            p.evaluate("git ch", &local2, true, false, None),
-            AiDecision::Skip
-        );
-    }
-
-    #[test]
-    fn sufficient_confidence_skips() {
-        let p = policy();
-        let local1 = make_local(1, 0.8, false, false, false);
-        assert_eq!(
-            p.evaluate("git ch", &local1, true, false, None),
-            AiDecision::Skip
-        );
-        let local2 = make_local(1, 0.6, false, false, false);
-        assert_eq!(
-            p.evaluate("git ch", &local2, true, false, None),
-            AiDecision::Skip
-        );
-    }
-
-    #[test]
-    fn both_insufficient_triggers_ai() {
-        let p = policy();
-        let local1 = make_local(1, 0.3, false, false, false);
-        assert_eq!(
-            p.evaluate("myapp d", &local1, true, false, None),
-            AiDecision::RequestNow
-        );
-        let local2 = make_local(0, 0.0, false, false, false);
-        assert_eq!(
-            p.evaluate("myapp d", &local2, true, false, None),
-            AiDecision::RequestNow
-        );
-        let local3 = make_local(1, 0.59, false, false, false);
-        assert_eq!(
-            p.evaluate("myapp d", &local3, true, false, None),
-            AiDecision::RequestNow
-        );
-    }
-
-    // --- should_request_ai tests (ported from daemon.rs) ---
-
-    #[test]
-    fn short_input_request_behavior() {
-        let p = policy();
-        let local = make_local(0, 0.0, false, false, false);
-        assert_eq!(p.evaluate("g", &local, true, false, None), AiDecision::Skip);
-        assert_eq!(
-            p.evaluate("rm", &local, true, false, None),
-            AiDecision::RequestNow
-        );
-        assert_eq!(
-            p.evaluate("gi", &local, true, false, None),
-            AiDecision::RequestNow
-        );
+        // Strong local history would previously have suppressed AI; it no
+        // longer does — history informs the prompt instead.
+        for input in ["git ch", "docker run", "myapp", "myapp d"] {
+            assert_eq!(
+                decide(&p, Case { input, ..base("") }),
+                AiDecision::RequestNow,
+                "input {input:?} should request AI regardless of local matches"
+            );
+        }
     }
 
     #[test]
     fn warning_blocks_request() {
         let p = policy();
-        let local = make_local(0, 0.0, true, false, false);
         assert_eq!(
-            p.evaluate("rm -rf /", &local, true, false, None),
-            AiDecision::Skip
-        );
-    }
-
-    #[test]
-    fn sufficient_local_blocks_request() {
-        let p = policy();
-        let local1 = make_local(3, 0.95, false, false, false);
-        assert_eq!(
-            p.evaluate("git checkout", &local1, true, false, None),
-            AiDecision::Skip
-        );
-        let local2 = make_local(2, 0.7, false, false, false);
-        assert_eq!(
-            p.evaluate("git checkout", &local2, true, false, None),
-            AiDecision::Skip
-        );
-        let local3 = make_local(1, 0.9, false, false, false);
-        assert_eq!(
-            p.evaluate("git checkout", &local3, true, false, None),
+            decide(
+                &p,
+                Case {
+                    input: "rm -rf /",
+                    warning: warn(),
+                    ..base("")
+                },
+            ),
             AiDecision::Skip
         );
     }
@@ -501,10 +500,16 @@ mod tests {
     #[test]
     fn debounce_returns_need_ai_only() {
         let p = policy();
-        let local = make_local(0, 0.0, false, false, false);
         let recent = Instant::now();
         assert_eq!(
-            p.evaluate("docker run", &local, true, false, Some(recent)),
+            decide(
+                &p,
+                Case {
+                    input: "docker run",
+                    last_ai_request_at: Some(recent),
+                    ..base("")
+                },
+            ),
             AiDecision::NeedAiOnly
         );
     }
@@ -512,46 +517,87 @@ mod tests {
     #[test]
     fn happy_path_requests_ai() {
         let p = policy();
-        let local1 = make_local(0, 0.5, false, false, false);
         assert_eq!(
-            p.evaluate("docker run", &local1, true, false, None),
+            decide(
+                &p,
+                Case {
+                    input: "docker run",
+                    ..base("")
+                }
+            ),
             AiDecision::RequestNow
         );
-        let local2 = make_local(1, 0.3, false, false, false);
         assert_eq!(
-            p.evaluate("myapp", &local2, true, false, None),
+            decide(
+                &p,
+                Case {
+                    input: "myapp",
+                    ..base("")
+                }
+            ),
             AiDecision::RequestNow
-        );
-    }
-
-    #[test]
-    fn sufficient_confidence_blocks_request() {
-        let p = policy();
-        let local = make_local(1, 0.9, false, false, false);
-        assert_eq!(
-            p.evaluate("git ch", &local, true, false, None),
-            AiDecision::Skip
         );
     }
 
     #[test]
     fn error_recovery_bypasses_input_check() {
         let p = policy();
-        let local = make_local(0, 0.0, false, true, false);
+        // Empty input + failure context is the error-recovery path.
         assert_eq!(
-            p.evaluate("", &local, true, false, None),
+            decide(
+                &p,
+                Case {
+                    has_failure_context: true,
+                    ..base("")
+                },
+            ),
             AiDecision::RequestNow
         );
+        // Nonempty failure context goes through completion, so a disabled
+        // error-recovery switch never blocks typing-time AI.
+        let no_recovery = AiTriggerPolicy {
+            debounce_ms: 300,
+            features: AiFeaturesConfig {
+                error_recovery: false,
+                completion: true,
+                nl_generation: true,
+            },
+        };
+        assert_eq!(
+            decide(
+                &no_recovery,
+                Case {
+                    input: "gi",
+                    has_failure_context: true,
+                    ..base("")
+                },
+            ),
+            AiDecision::RequestNow
+        );
+        assert_eq!(
+            decide(
+                &no_recovery,
+                Case {
+                    has_failure_context: true,
+                    ..base("")
+                },
+            ),
+            AiDecision::Skip
+        );
     }
-
-    // --- New tests for evaluate edge cases ---
 
     #[test]
     fn skip_ai_returns_need_ai_only() {
         let p = policy();
-        let local = make_local(0, 0.0, false, false, false);
         assert_eq!(
-            p.evaluate("docker run", &local, true, true, None),
+            decide(
+                &p,
+                Case {
+                    input: "docker run",
+                    skip_ai: true,
+                    ..base("")
+                },
+            ),
             AiDecision::NeedAiOnly
         );
     }
@@ -559,9 +605,15 @@ mod tests {
     #[test]
     fn no_ai_provider_skips() {
         let p = policy();
-        let local = make_local(0, 0.0, false, false, false);
         assert_eq!(
-            p.evaluate("docker run", &local, false, false, None),
+            decide(
+                &p,
+                Case {
+                    input: "docker run",
+                    ai_available: false,
+                    ..base("")
+                },
+            ),
             AiDecision::Skip
         );
     }
@@ -569,10 +621,38 @@ mod tests {
     #[test]
     fn error_recovery_with_skip_ai_returns_need_ai_only() {
         let p = policy();
-        let local = make_local(0, 0.0, false, true, false);
         assert_eq!(
-            p.evaluate("", &local, true, true, None),
+            decide(
+                &p,
+                Case {
+                    has_failure_context: true,
+                    skip_ai: true,
+                    ..base("")
+                },
+            ),
             AiDecision::NeedAiOnly
+        );
+    }
+
+    #[test]
+    fn completion_disabled_skips_nonempty_input() {
+        let p = AiTriggerPolicy {
+            debounce_ms: 300,
+            features: AiFeaturesConfig {
+                error_recovery: true,
+                completion: false,
+                nl_generation: true,
+            },
+        };
+        assert_eq!(
+            decide(
+                &p,
+                Case {
+                    input: "docker run",
+                    ..base("")
+                }
+            ),
+            AiDecision::Skip
         );
     }
 }

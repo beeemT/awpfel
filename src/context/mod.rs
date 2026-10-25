@@ -2,7 +2,7 @@ pub mod git;
 pub mod repo;
 pub mod session;
 
-use crate::config::AwenConfig;
+use crate::config::AwpfelConfig;
 use crate::protocol::{ContextResponse, RequestContext};
 use crate::sanitize;
 use repo::RepoInfo;
@@ -12,11 +12,11 @@ use std::path::PathBuf;
 pub struct ContextEngine {
     session: SessionContext,
     cached_repo: Option<(PathBuf, Option<RepoInfo>)>,
-    config: AwenConfig,
+    config: AwpfelConfig,
 }
 
 impl ContextEngine {
-    pub fn new(config: &AwenConfig) -> Self {
+    pub fn new(config: &AwpfelConfig) -> Self {
         Self {
             session: SessionContext::new(config.context.session_history_size),
             cached_repo: None,

@@ -1,4 +1,3 @@
-pub mod arbitrator;
 pub mod config;
 pub mod context;
 pub mod daemon;
