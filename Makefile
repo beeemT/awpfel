@@ -46,8 +46,6 @@ restart:
 # Run all tests
 test:
 	cargo test
-	shellcheck install.sh
-	shellcheck install-remote.sh
 	shellcheck scripts/build-archives.sh
 	@if command -v zsh >/dev/null 2>&1; then \
 		zsh tests/zsh_smoke_test.zsh; \
@@ -57,8 +55,6 @@ test:
 lint:
 	cargo clippy
 	cargo fmt --check
-	shellcheck install.sh
-	shellcheck install-remote.sh
 	shellcheck scripts/build-archives.sh
 
 status:

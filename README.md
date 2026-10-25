@@ -77,59 +77,10 @@ awpfel setup
 background daemon. The daemon manages a local Apfel on its own port.
 You do not run `brew services start apfel`.
 
-### Shell script
-
-Runs on this machine only (macOS Apple Silicon). It downloads the
-macOS Apple Silicon archive from the latest release.
-
-```bash
-curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
-```
-
-### Build from source
-
-Runs on this machine only (macOS Apple Silicon). `install.sh`
-refuses other hosts and builds with the local Rust toolchain.
-
-**Prerequisites:** current stable Rust, zsh, apfel, jq, socat.
-
-```bash
-git clone https://github.com/beeemT/awpfel.git
-cd awpfel
-./install.sh
-```
-
-The installer stores the shell modules in `~/.config/awpfel/` and creates the directory if needed.
-
 ---
 
 Restart your shell. Awpfel starts with the shell and imports your
 zsh history on first launch.
-
-## Update
-
-### Homebrew
-
-```bash
-brew upgrade beeemT/tap/awpfel
-awpfel stop && awpfel start
-```
-
-### Shell script
-
-```bash
-curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
-```
-
-### From source
-
-```bash
-cd awpfel
-git pull
-./install.sh
-```
-
-Restart your shell after updating.
 
 ## Uninstall
 
@@ -146,15 +97,6 @@ for confirmation.
 
 ```bash
 brew uninstall awpfel
-```
-
-**Shell script / source install:**
-
-```bash
-rm ~/.local/bin/awpfel
-rm -rf ~/.config/awpfel
-rm -rf ~/.local/share/awpfel
-# Remove the awpfel source lines from ~/.zshrc
 ```
 
 ## CLI

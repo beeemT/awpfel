@@ -76,56 +76,9 @@ awpfel setup
 Daemon 管理自己的本地 Apfel。不需要运行
 `brew services start apfel`。
 
-### 一键脚本
-
-只在本机运行（macOS Apple Silicon）。它从最新 release
-下载 macOS Apple Silicon 归档。
-
-```bash
-curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
-```
-
-### 从源码构建
-
-只在本机运行（macOS Apple Silicon）。
-`install.sh` 拒绝其他主机，用本地 Rust 工具链构建。
-
-**前置条件：** 当前稳定版 Rust、zsh、apfel、jq、socat。
-
-```bash
-git clone https://github.com/beeemT/awpfel.git
-cd awpfel
-./install.sh
-```
-
 ---
 
 重启 shell。Awpfel 随 shell 启动，首次启动自动导入 zsh 历史。
-
-## 更新
-
-### Homebrew
-
-```bash
-brew upgrade beeemT/tap/awpfel
-awpfel stop && awpfel start
-```
-
-### 一键脚本
-
-```bash
-curl -sSL https://raw.githubusercontent.com/beeemT/awpfel/main/install-remote.sh | sh
-```
-
-### 从源码
-
-```bash
-cd awpfel
-git pull
-./install.sh
-```
-
-更新后重启 shell。
 
 ## 卸载
 
@@ -141,15 +94,6 @@ awpfel uninstall --yes
 
 ```bash
 brew uninstall awpfel
-```
-
-**一键脚本 / 源码安装：**
-
-```bash
-rm ~/.local/bin/awpfel
-rm -rf ~/.config/awpfel
-rm -rf ~/.local/share/awpfel
-# 从 ~/.zshrc 删除 awpfel 相关行
 ```
 
 ## CLI
