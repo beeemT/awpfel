@@ -213,6 +213,12 @@ If a tag push misses the release, run the release again from main for that tag.
 gh workflow run release --repo beeemT/awpfel --ref main -f tag=vX.Y.Z
 ```
 
+If a push misses CI, run CI again from main.
+
+```bash
+gh workflow run CI --repo beeemT/awpfel --ref main
+```
+
 ## Credits
 
 Awpfel builds on two open projects:
