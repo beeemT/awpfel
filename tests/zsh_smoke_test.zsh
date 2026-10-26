@@ -51,6 +51,7 @@ load_plugin_functions() {
     bindkey()      { : }
     autoload()     { : }
     add-zsh-hook() { : }
+    add-zle-hook-widget() { : }
     typeset -g _AWPFEL_PLUGIN_DIR="$PLUGIN_DIR"
     eval "$(sed -e '/^awpfel_init$/d' -e '/^typeset -g _AWPFEL_PLUGIN_DIR=/d' "$PLUGIN_FILE")"
 }
@@ -117,10 +118,14 @@ reset_harness() {
     _AWPFEL_LAST_RECORDED_COMMAND=""
     _AWPFEL_SESSION_CMDS=()
     _AWPFEL_LAST_EXIT_CODE=0
+    _AWPFEL_NEXT_COMMAND_ENABLED=0
+    _AWPFEL_STATUS_FETCHED=1
+    _AWPFEL_SOCKET=""
     _HARNESS_ACCEPTED_LINE="<none>"
     _HARNESS_EXPAND_CALLED=0
     _AWPFEL_HAS_JQ=1
-    _awpfel_suggest_local() { : }
+    COLUMNS=80
+    _AWPFEL_AI_DELAY="${AWPFEL_AI_DELAY:-0.25}"
 }
 
 # Async test helper: stage a result file with seq/kind/line-rev + JSON.
@@ -412,6 +417,7 @@ assert_contains "apply nonprefix: visible preview" "$POSTDISPLAY" "git checkout 
 # body highlight; exclusive end matches the actual POSTDISPLAY.
 COLUMNS=20
 reset_harness
+COLUMNS=20
 BUFFER="gco"
 CURSOR=${#BUFFER}
 _long_cmd="git checkout some-very-long-branch-name-that-overflows"
@@ -645,6 +651,270 @@ _awpfel_stderr_probe=$(print -ru2 $((17 * 19)) 2>&1)
 assert_eq "fd close preserves shell stderr" "323" "$_awpfel_stderr_probe"
 rm -f "$_AWPFEL_AI_FIFO"
 
+# ============================================================
+# Test: fresh-prompt empty next-command — user-visible state only.
+# Scheduling eligibility is covered by the parent real-PTY smoke;
+# here only ghost/hint/BUFFER/cursor/cancel/stale-guard invariants.
+# ============================================================
+# Fresh prompt entry clears owned ghost/hint (user-visible half of the
+# hook; scheduling eligibility is covered by the parent real-PTY smoke).
+reset_harness
+BUFFER=""
+CURSOR=0
+_AWPFEL_SUGGESTION="stale ghost"
+POSTDISPLAY="stale ghost"
+_AWPFEL_HINT="stale"
+_awpfel_line_init_hook
+assert_eq "fresh entry: stale ghost cleared" "" "$POSTDISPLAY"
+assert_eq "fresh entry: stale suggestion cleared" "" "$_AWPFEL_SUGGESTION"
+assert_eq "fresh entry: hint cleared" "" "$_AWPFEL_HINT"
+
+# Clearing to empty via typing/paste path never retriggers: cleared, idle.
+reset_harness
+BUFFER=""
+_AWPFEL_SUGGESTION="stale ghost"
+POSTDISPLAY="stale ghost"
+_awpfel_suggest_local
+assert_eq "clear-to-empty: ghost cleared" "" "$POSTDISPLAY"
+assert_eq "clear-to-empty: suggestion cleared" "" "$_AWPFEL_SUGGESTION"
+reset_harness
+
+# Line-finish never leaks a visible ghost; hint cleared too.
+reset_harness
+BUFFER="git status"
+CURSOR=${#BUFFER}
+_AWPFEL_SUGGESTION="git status --short"
+POSTDISPLAY=" --short"
+_AWPFEL_HINT="stale"
+_awpfel_line_finish_hook
+assert_eq "finish: ghost cleared" "" "$POSTDISPLAY"
+assert_eq "finish: suggestion cleared" "" "$_AWPFEL_SUGGESTION"
+assert_eq "finish: hint cleared" "" "$_AWPFEL_HINT"
+
+# Deleting to empty clears the visible ghost and never initiates.
+reset_harness
+BUFFER=""
+CURSOR=0
+_AWPFEL_SUGGESTION="stale ghost"
+POSTDISPLAY="stale ghost"
+_awpfel_backward_delete_char
+assert_eq "delete-to-empty: ghost cleared" "" "$POSTDISPLAY"
+assert_eq "delete-to-empty: suggestion cleared" "" "$_AWPFEL_SUGGESTION"
+reset_harness
+
+# Stale empty result arriving after typing never lands on the new line.
+reset_harness
+BUFFER="git status"
+CURSOR=${#BUFFER}
+_awpfel_line_sync
+_AWPFEL_LINE_REV=8
+_AWPFEL_ASYNC_LINE_REV=8
+stage_result 40 suggest "" '{"type":"suggest","suggestions":[{"text":"git status"}],"need_ai":false}'
+_AWPFEL_LINE_REV=9
+_awpfel_check_ai_result
+assert_eq "stale empty: ignored after typing" "" "$_AWPFEL_SUGGESTION"
+assert_eq "stale empty: no ghost on new line" "" "$POSTDISPLAY"
+rm -f "$_AWPFEL_AI_RESULT_FILE"
+
+# Empty inline preview accepts through normal keys and never executes.
+reset_harness
+BUFFER=""
+CURSOR=0
+_awpfel_render_ghost "git status"
+assert_eq "empty ghost: full staged" "git status" "$_AWPFEL_SUGGESTION"
+assert_eq "empty ghost: preview visible" "git status" "$POSTDISPLAY"
+_ghost_hl=""
+for _hl_entry in "${region_highlight[@]}"; do
+    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
+        _ghost_hl="$_hl_entry"
+    fi
+done
+assert_eq "empty ghost: highlight covers full preview" "0 ${#POSTDISPLAY} $_AWPFEL_GHOST_STYLE" "$_ghost_hl"
+_awpfel_tab
+assert_eq "empty tab: buffer takes prediction" "git status" "$BUFFER"
+assert_eq "empty tab: cursor at end" "${#BUFFER}" "$CURSOR"
+assert_eq "empty accept: never executed" "<none>" "$_HARNESS_ACCEPTED_LINE"
+reset_harness
+
+# ============================================================
+# Test: normal multiline is append-only (full + chunk accept)
+# ============================================================
+reset_harness
+_ml_in=$'echo a\necho'
+_ml_full=$'echo a\necho b'
+BUFFER="$_ml_in"
+CURSOR=${#BUFFER}
+_awpfel_render_ghost "$_ml_full"
+assert_eq "ml prefix: full preserved" "$_ml_full" "$_AWPFEL_SUGGESTION"
+_awpfel_tab
+assert_eq "ml tab: appends suffix, preserves all input bytes" "$_ml_full" "$BUFFER"
+assert_eq "ml tab: cursor at end" "${#BUFFER}" "$CURSOR"
+assert_eq "ml tab: never executed" "<none>" "$_HARNESS_ACCEPTED_LINE"
+
+reset_harness
+BUFFER="$_ml_in"
+CURSOR=${#BUFFER}
+_awpfel_render_ghost "$_ml_full"
+_awpfel_accept_chunk
+if [[ "$BUFFER" == "$_ml_in"* ]]; then pass; else fail "ml chunk: input bytes preserved" "BUFFER=$BUFFER"; fi
+assert_eq "ml chunk: never executed" "<none>" "$_HARNESS_ACCEPTED_LINE"
+
+# Non-prefix candidate on a normal multiline line never clobbers input.
+reset_harness
+BUFFER=$'echo a\necho b'
+CURSOR=${#BUFFER}
+region_highlight=("0 3 foreign-style")
+_AWPFEL_SUGGESTION="git status --short"
+POSTDISPLAY=$'\n  → git status --short'
+_awpfel_tab
+assert_eq "ml foreign tab: buffer preserved" $'echo a\necho b' "$BUFFER"
+assert_eq "ml foreign tab: ghost dropped" "" "$POSTDISPLAY"
+assert_eq "ml foreign tab: suggestion dropped" "" "$_AWPFEL_SUGGESTION"
+assert_contains "ml foreign tab: foreign highlight kept" "${region_highlight[*]}" "foreign-style"
+_HARNESS_FOREIGN_KEPT=0
+for _hl_entry in "${region_highlight[@]}"; do
+    [[ "$_hl_entry" == *"foreign-style"* ]] && _HARNESS_FOREIGN_KEPT=1
+done
+assert_eq "ml foreign tab: foreign entry survives" "1" "$_HARNESS_FOREIGN_KEPT"
+
+reset_harness
+BUFFER=$'echo a\necho b'
+CURSOR=${#BUFFER}
+_AWPFEL_SUGGESTION="git status --short"
+POSTDISPLAY=$'\n  → git status --short'
+_awpfel_accept_chunk
+assert_eq "ml foreign chunk: buffer preserved" $'echo a\necho b' "$BUFFER"
+assert_eq "ml foreign chunk: ghost dropped" "" "$POSTDISPLAY"
+
+# "# " NL replacement stays exempt from the multiline guard.
+reset_harness
+BUFFER="# list pods"
+CURSOR=${#BUFFER}
+_awpfel_line_sync
+stage_result 60 nl_preview "# list pods" '{"type":"nl_generate","command":"kubectl get pods"}'
+_awpfel_check_ai_result
+assert_eq "nl hash: buffer untouched" "# list pods" "$BUFFER"
+assert_contains "nl hash: visible preview" "$POSTDISPLAY" "kubectl get pods"
+_awpfel_tab
+assert_eq "nl hash tab: replacement applied" "kubectl get pods" "$BUFFER"
+assert_eq "nl hash tab: never executed" "<none>" "$_HARNESS_ACCEPTED_LINE"
+rm -f "$_AWPFEL_AI_RESULT_FILE"
+
+# Renderer contract cases (owned by RendererNativeWrap; consumer state here).
+# 1. Empty BUFFER + full shows a visible ghost with 0-based HL.
+reset_harness
+BUFFER=""
+CURSOR=0
+_awpfel_render_ghost "git status"
+assert_eq "render empty: full kept" "git status" "$_AWPFEL_SUGGESTION"
+assert_contains "render empty: ghost visible" "$POSTDISPLAY" "git status"
+_re_hl=""
+for _hl_entry in "${region_highlight[@]}"; do
+    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
+        _re_hl="$_hl_entry"
+    fi
+done
+assert_eq "render empty: HL 0-based exclusive" "0 ${#POSTDISPLAY} $_AWPFEL_GHOST_STYLE" "$_re_hl"
+
+# 2. Long suffix at narrow width keeps FULL text, truncates display.
+reset_harness
+COLUMNS=20
+BUFFER="git "
+CURSOR=${#BUFFER}
+_long_full="git some-extremely-long-command-that-overflows-the-line"
+_awpfel_render_ghost "$_long_full"
+assert_eq "render narrow: full kept" "$_long_full" "$_AWPFEL_SUGGESTION"
+assert_contains "render narrow: ellipsis shown" "$POSTDISPLAY" "…"
+assert_eq "render narrow: display bounded" "20" "${#POSTDISPLAY}"
+_re_hl=""
+for _hl_entry in "${region_highlight[@]}"; do
+    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
+        _re_hl="$_hl_entry"
+    fi
+done
+_re_exp_end=$(( ${#BUFFER} + ${#POSTDISPLAY} ))
+_re_gb_end="${_re_hl##* }"
+_re_gb_end="${_re_hl% $_AWPFEL_GHOST_STYLE}"
+_re_gb_end="${_re_gb_end##* }"
+assert_eq "render narrow: HL ends at buffer+shown" "$_re_exp_end" "$_re_gb_end"
+COLUMNS=80
+
+# 3. Nothing visible fits: no invisible Tab-accept.
+reset_harness
+COLUMNS=1
+BUFFER="git "
+CURSOR=${#BUFFER}
+_awpfel_render_ghost "git some-extremely-long-command"
+assert_eq "render tiny: suggestion dropped" "" "$_AWPFEL_SUGGESTION"
+assert_eq "render tiny: ghost dropped" "" "$POSTDISPLAY"
+COLUMNS=80
+
+# 4. Normal multiline non-prefix: no replacement preview.
+reset_harness
+BUFFER=$'echo a\necho b'
+CURSOR=${#BUFFER}
+region_highlight=("0 5 foreign-style")
+_awpfel_render_ghost "git status --short"
+assert_eq "render ml foreign: suggestion dropped" "" "$_AWPFEL_SUGGESTION"
+assert_eq "render ml foreign: ghost dropped" "" "$POSTDISPLAY"
+_HARNESS_FOREIGN_KEPT=0
+for _hl_entry in "${region_highlight[@]}"; do
+    [[ "$_hl_entry" == *"foreign-style"* ]] && _HARNESS_FOREIGN_KEPT=1
+done
+assert_eq "render ml foreign: foreign HL kept" "1" "$_HARNESS_FOREIGN_KEPT"
+
+# 5. Normal multiline exact-prefix: suffix ghost, full preserved.
+reset_harness
+BUFFER=$'echo a\necho'
+CURSOR=${#BUFFER}
+_awpfel_render_ghost $_ml_full
+assert_eq "render ml prefix: full preserved" "$_ml_full" "$_AWPFEL_SUGGESTION"
+if [[ -n "$POSTDISPLAY" ]]; then pass; else fail "render ml prefix: suffix ghost shown" "POSTDISPLAY empty"; fi
+
+# 6. "# " NL keeps the arrow replacement preview + 5-char offsets.
+reset_harness
+BUFFER="# list files"
+CURSOR=${#BUFFER}
+_awpfel_render_ghost "ls -la"
+assert_contains "render hash: arrow preview" "$POSTDISPLAY" "→"
+assert_contains "render hash: command shown" "$POSTDISPLAY" "ls -la"
+_np_hl=""
+for _hl_entry in "${region_highlight[@]}"; do
+    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
+        _np_hl="$_hl_entry"
+    fi
+done
+_np_shown="${POSTDISPLAY#*→ }"
+_np_prefix_len=$(( ${#POSTDISPLAY} - ${#_np_shown} ))
+assert_eq "render hash: prefix is newline+arrow (5 chars)" "5" "$_np_prefix_len"
+_np_exp_start=$(( ${#BUFFER} + _np_prefix_len ))
+_np_exp_end=$(( _np_exp_start + ${#_np_shown} ))
+_np_gb_start="${_np_hl%% *}"
+_np_gb_rest="${_np_hl#* }"
+_np_gb_end="${_np_gb_rest%% *}"
+assert_eq "render hash: ghost starts at command" "$_np_exp_start" "$_np_gb_start"
+assert_eq "render hash: ghost ends at preview end" "$_np_exp_end" "$_np_gb_end"
+
+# 7. Ghost styling covers exactly the shown glyphs through ellipsis.
+reset_harness
+COLUMNS=20
+BUFFER="gco"
+CURSOR=${#BUFFER}
+_awpfel_render_ghost "git checkout some-very-long-branch-name-that-overflows"
+assert_contains "render styled: ellipsis shown" "$POSTDISPLAY" "…"
+_tr_hl=""
+for _hl_entry in "${region_highlight[@]}"; do
+    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
+        _tr_hl="$_hl_entry"
+    fi
+done
+_tr_shown="${POSTDISPLAY#*→ }"
+_tr_exp_end2=$(( ${#BUFFER} + ${#POSTDISPLAY} - ${#_tr_shown} + ${#_tr_shown} ))
+_tr_gb_start2="${_tr_hl%% *}"
+_tr_gb_rest2="${_tr_hl#* }"
+_tr_gb_end2="${_tr_gb_rest2%% *}"
+assert_eq "render styled: ghost ends at preview end" "$_tr_exp_end2" "$_tr_gb_end2"
+COLUMNS=80
 # Summary
 # ============================================================
 

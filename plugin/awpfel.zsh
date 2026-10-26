@@ -37,7 +37,9 @@ typeset -g _AWPFEL_AI_SEQ=0
 typeset -g _AWPFEL_AI_ACTIVE_SEQ=0
 typeset -g _AWPFEL_PENDING_KIND=""
 typeset -g _AWPFEL_NEED_AI=""
-typeset -g _AWPFEL_AI_DELAY="${AWPFEL_AI_DELAY:-0.35}"
+typeset -g _AWPFEL_AI_DELAY="${AWPFEL_AI_DELAY:-0.25}"
+typeset -g _AWPFEL_NEXT_COMMAND_ENABLED=0
+typeset -g -i _AWPFEL_STATUS_FETCHED=0
 typeset -g _AWPFEL_AI_LOADING=0
 typeset -g _AWPFEL_LOCAL_THROTTLE_MS="${AWPFEL_LOCAL_THROTTLE_MS:-20}"
 typeset -g _AWPFEL_LAST_LOCAL_MS=0
@@ -89,6 +91,58 @@ _awpfel_line_sync() {
     _AWPFEL_OWN_LINE_SEEN=""
 }
 
+_awpfel_refresh_status_config() {
+    [[ -S "${_AWPFEL_SOCKET:-}" ]] || return 1
+    local _resp
+    _resp=$(_awpfel_send_nc '{"type":"status"}')
+    [[ -n "$_resp" ]] || return 1
+    local _cv=""
+    _cv=$(printf '%s\n' "$_resp" | jq -r '.config.ghost_text_color // empty' 2>/dev/null)
+    [[ -z "${AWPFEL_GHOST_STYLE:-}" && -n "$_cv" ]] && _AWPFEL_GHOST_STYLE="fg=$_cv"
+    _cv=$(printf '%s\n' "$_resp" | jq -r '.config.stderr_max_chars // empty' 2>/dev/null)
+    [[ -z "${AWPFEL_STDERR_MAX_CHARS:-}" && -n "$_cv" ]] && _AWPFEL_STDERR_MAX="$_cv"
+    _cv=$(printf '%s\n' "$_resp" | jq -r '.config.next_command_enabled // empty' 2>/dev/null)
+    if [[ "$_cv" == "true" ]]; then
+        _AWPFEL_NEXT_COMMAND_ENABLED=1
+    else
+        _AWPFEL_NEXT_COMMAND_ENABLED=0
+    fi
+    _AWPFEL_STATUS_FETCHED=1
+    return 0
+}
+
+# Fresh prompt entry: every entry cancels owned async and clears owned
+# ghost (even empty->empty), then — when the effective opt-in holds, the
+# socket is live, and the line is a fresh empty prompt (cursor 0) — one
+# normal suggest is scheduled via the existing async path. The hook is
+# the sole empty source; no fresh flag or new request type is needed.
+# If the daemon was unavailable at init, config is lazily refreshed
+# once when the first socket shows up on line-init; no polling.
+_awpfel_line_init_hook() {
+    _awpfel_cancel_pending_ai
+    _awpfel_clear_ghost
+    _awpfel_clear_hint
+    _awpfel_line_sync
+    if (( ! _AWPFEL_STATUS_FETCHED )) && [[ -S "${_AWPFEL_SOCKET:-}" ]]; then
+        _awpfel_refresh_status_config 2>/dev/null
+    fi
+    if (( _AWPFEL_NEXT_COMMAND_ENABLED )) && [[ -S "${_AWPFEL_SOCKET:-}" ]]; then
+        if [[ -z "${BUFFER:-}" ]] && (( ${CURSOR:-0} == 0 )); then
+            _awpfel_check_ai_result
+            _awpfel_schedule_suggest 2>/dev/null
+        fi
+    fi
+}
+
+# Line finish: never let an owned ghost or in-flight empty prediction
+# leak into the next prompt. The accept-line widget already clears its
+# own path; this covers the remaining finish routes.
+_awpfel_line_finish_hook() {
+    _awpfel_cancel_pending_ai
+    _awpfel_clear_ghost
+    _awpfel_clear_hint
+}
+
 # Record an intentional plugin-side BUFFER change (accept paths): bumps
 # the revision but stamps the async snapshot to match, so the selected
 # ghost survives our own edit while foreign edits invalidate it.
@@ -131,6 +185,8 @@ awpfel_init() {
     autoload -Uz add-zsh-hook add-zle-hook-widget
     add-zsh-hook zshexit _awpfel_trap_cleanup
     add-zle-hook-widget line-pre-redraw _awpfel_line_redraw
+    add-zle-hook-widget line-init _awpfel_line_init_hook
+    add-zle-hook-widget line-finish _awpfel_line_finish_hook
     add-zsh-hook precmd _awpfel_precmd
     add-zsh-hook preexec _awpfel_preexec
 
@@ -141,17 +197,7 @@ awpfel_init() {
 
     _awpfel_ensure_daemon
 
-    if [[ -S "$_AWPFEL_SOCKET" ]]; then
-        local _cfg_resp
-        _cfg_resp=$(_awpfel_send_nc '{"type":"status"}')
-        if [[ -n "$_cfg_resp" ]]; then
-            local _cv=""
-            _cv=$(printf '%s\n' "$_cfg_resp" | jq -r '.config.ghost_text_color // empty' 2>/dev/null)
-            [[ -z "${AWPFEL_GHOST_STYLE:-}" && -n "$_cv" ]] && _AWPFEL_GHOST_STYLE="fg=$_cv"
-            _cv=$(printf '%s\n' "$_cfg_resp" | jq -r '.config.stderr_max_chars // empty' 2>/dev/null)
-            [[ -z "${AWPFEL_STDERR_MAX_CHARS:-}" && -n "$_cv" ]] && _AWPFEL_STDERR_MAX="$_cv"
-        fi
-    fi
+    _awpfel_refresh_status_config 2>/dev/null
 
     zle -N _awpfel_self_insert
     zle -N _awpfel_backward_delete_char
@@ -165,6 +211,8 @@ awpfel_init() {
     zle -N _awpfel_accept_line
     zle -N _awpfel_nl_transform
     zle -N _awpfel_backward_char
+    zle -N _awpfel_line_init_hook
+    zle -N _awpfel_line_finish_hook
 
     if [[ "${AWPFEL_ENABLE_KEYBIND_OVERRIDE:-1}" == "1" ]]; then
         zle -N bracketed-paste _awpfel_bracketed_paste

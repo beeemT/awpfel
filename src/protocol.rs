@@ -124,6 +124,8 @@ pub struct StatusConfig {
     pub ghost_text_color: u8,
     pub capture_stderr: bool,
     pub stderr_max_chars: usize,
+    #[serde(default)]
+    pub next_command_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

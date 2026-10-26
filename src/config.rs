@@ -29,6 +29,7 @@ pub struct AiFeaturesConfig {
     pub error_recovery: bool,
     pub completion: bool,
     pub nl_generation: bool,
+    pub next_command: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +75,7 @@ impl Default for AiConfig {
             base_url: "http://127.0.0.1:11435/v1".into(),
             model: "apple-foundationmodel".into(),
             api_key: String::new(),
-            debounce_ms: 300,
+            debounce_ms: 250,
             timeout_ms: 30000,
             max_tokens: 256,
             features: AiFeaturesConfig::default(),
@@ -85,9 +86,10 @@ impl Default for AiConfig {
 impl Default for AiFeaturesConfig {
     fn default() -> Self {
         Self {
-            error_recovery: false,
+            error_recovery: true,
             completion: true,
             nl_generation: true,
+            next_command: true,
         }
     }
 }

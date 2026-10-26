@@ -772,6 +772,74 @@ async fn test_ai_suggestion_merged_into_response() {
 }
 
 #[tokio::test]
+async fn test_next_command_and_error_recovery_are_independent() {
+    for (next_command, error_recovery, failed, has_stderr, expected) in [
+        (false, false, false, false, None),
+        (true, false, false, false, Some("pods --all-namespaces")),
+        (true, false, true, true, Some("pods --all-namespaces")),
+        (
+            true,
+            true,
+            true,
+            true,
+            Some("kubectl get pods --all-namespaces"),
+        ),
+        (
+            false,
+            true,
+            true,
+            true,
+            Some("kubectl get pods --all-namespaces"),
+        ),
+        (
+            true,
+            true,
+            true,
+            false,
+            Some("kubectl get pods --all-namespaces"),
+        ),
+        (true, false, true, false, Some("pods --all-namespaces")),
+    ] {
+        let mut config = test_config();
+        config.ai.enabled = true;
+        config.ai.debounce_ms = 0;
+        config.ai.features.next_command = next_command;
+        config.ai.features.error_recovery = error_recovery;
+        let daemon = TestDaemon::start_with_ai(config, Arc::new(FastMockProvider::new())).await;
+        let response = daemon
+            .send(&Request::Suggest(SuggestRequest {
+                input: String::new(),
+                cursor_pos: 0,
+                context: RequestContext {
+                    cwd: "/tmp".into(),
+                    last_command: Some("myapp migrate".into()),
+                    last_exit_code: Some(if failed { 1 } else { 0 }),
+                    last_stderr: (failed && has_stderr)
+                        .then(|| "database connection timeout after 30s".into()),
+                    git_branch: None,
+                    git_status: None,
+                    session_commands: vec!["myapp migrate".into()],
+                    env_hints: vec![],
+                },
+                timestamp: None,
+                skip_ai: false,
+            }))
+            .await;
+        let Response::Suggest(response) = response else {
+            panic!("expected Suggest, got {response:?}");
+        };
+        assert_eq!(
+            response.suggestions.first().map(|s| s.text.as_str()),
+            expected,
+            "next={next_command}, recovery={error_recovery}, failed={failed}, has_stderr={has_stderr}"
+        );
+        assert_eq!(response.suggestions.len(), usize::from(expected.is_some()));
+        assert_eq!(response.need_ai, expected.is_some());
+        daemon.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn test_ai_debounce_skips_second_request() {
     let mut config = AwpfelConfig::default();
     config.ai.enabled = true;

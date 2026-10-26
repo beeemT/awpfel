@@ -20,6 +20,7 @@ pub struct AiParams {
     pub max_tokens: u32,
     pub timeout_ms: u64,
     pub stderr_max_chars: usize,
+    pub error_recovery_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,10 +57,9 @@ impl AiTriggerPolicy {
 
     /// Decide whether the async AI phase is eligible.
     ///
-    /// AI is the sole producer of ghost text, so local match strength never
-    /// gates the decision: any eligible nonempty debounced input triggers a
-    /// call, with relevant history supplied as prompt context instead of
-    /// competing output.
+    /// AI is the sole producer of ghost text. Local match strength never
+    /// gates nonempty completion; history supplies prompt context instead of
+    /// competing output. Empty prediction and recovery have separate gates.
     pub fn evaluate(&self, e: AiEligibility<'_>) -> AiDecision {
         if !self.ai_is_useful(e.input, e.signals) {
             return AiDecision::Skip;
@@ -83,14 +83,13 @@ impl AiTriggerPolicy {
         if signals.warning.is_some() {
             return false;
         }
-        // Error recovery supplements empty-input failure context only through
-        // AI. Normal nonempty completion must not be hijacked by the
-        // error-recovery switch: when the user is typing, completion decides.
-        if signals.has_failure_context && input.is_empty() {
-            if signals.local_failure_matched {
-                return false;
-            }
-            return self.features.error_recovery;
+        // Empty prompts can request next-command prediction independently of
+        // recovery. A local failure hint suppresses recovery, not prediction.
+        if input.is_empty() {
+            return (signals.has_failure_context
+                && !signals.local_failure_matched
+                && self.features.error_recovery)
+                || (self.features.completion && self.features.next_command);
         }
         if !self.features.completion {
             return false;
@@ -156,7 +155,11 @@ impl SuggestionPipeline {
         let has_failure_context = req_context
             .last_exit_code
             .is_some_and(|c| c != 0 && !FailureLayer::is_user_signal(c))
-            && req_context.last_stderr.is_some();
+            && (req_context.last_stderr.is_some()
+                || req_context
+                    .last_command
+                    .as_deref()
+                    .is_some_and(|command| !command.trim().is_empty()));
 
         let warning = if risk_enabled && !input.is_empty() {
             risk.check(input)
@@ -191,11 +194,13 @@ impl SuggestionPipeline {
         if decision == AiDecision::RequestNow
             && let Some(ref params) = ai_params
         {
-            // Failure error-recovery and normal completion share the AI path.
-            // Optional error-recovery never hijacks normal completion: the
-            // task splits on empty-input failure context only; when the user
-            // is typing, completion decides. Local matches never gate AI.
-            let task = if signals.has_failure_context && input.is_empty() {
+            // Recovery keeps its own gate even when next-command prediction
+            // made an empty prompt eligible.
+            let task = if input.is_empty()
+                && signals.has_failure_context
+                && !signals.local_failure_matched
+                && params.error_recovery_enabled
+            {
                 AiTask::ErrorRecovery {
                     context,
                     history_matches,
@@ -237,7 +242,14 @@ impl SuggestionPipeline {
                 input,
                 history_matches,
                 ..
-            } => (ai::build_prompt(input, &ctx, history_matches), "completion"),
+            } => (
+                ai::build_prompt(input, &ctx, history_matches),
+                if input.is_empty() {
+                    "next command"
+                } else {
+                    "completion"
+                },
+            ),
         };
 
         tracing::info!("AI {label} started");
@@ -300,6 +312,7 @@ mod tests {
                 error_recovery: true,
                 completion: true,
                 nl_generation: true,
+                next_command: false,
             },
         }
     }
@@ -561,6 +574,7 @@ mod tests {
                 error_recovery: false,
                 completion: true,
                 nl_generation: true,
+                next_command: false,
             },
         };
         assert_eq!(
@@ -642,6 +656,7 @@ mod tests {
                 error_recovery: true,
                 completion: false,
                 nl_generation: true,
+                next_command: false,
             },
         };
         assert_eq!(
@@ -653,6 +668,72 @@ mod tests {
                 }
             ),
             AiDecision::Skip
+        );
+    }
+
+    #[test]
+    fn empty_input_policy_table() {
+        // (completion, next_command, error_recovery, has_failure, local_matched) -> expected.
+        let rows = [
+            (true, false, false, false, false, AiDecision::Skip),
+            (true, true, false, false, false, AiDecision::RequestNow),
+            (false, true, false, false, false, AiDecision::Skip),
+            (true, true, false, true, false, AiDecision::RequestNow),
+            (true, false, true, true, false, AiDecision::RequestNow),
+            (true, false, true, true, true, AiDecision::Skip),
+            (true, true, true, true, true, AiDecision::RequestNow),
+        ];
+        for (completion, next_command, error_recovery, has_failure, local_matched, expected) in rows
+        {
+            let mut p = policy();
+            p.features.completion = completion;
+            p.features.next_command = next_command;
+            p.features.error_recovery = error_recovery;
+            assert_eq!(
+                decide(
+                    &p,
+                    Case {
+                        has_failure_context: has_failure,
+                        local_failure_matched: local_matched,
+                        ..base("")
+                    },
+                ),
+                expected,
+                "completion={completion} next_command={next_command} error_recovery={error_recovery} has_failure={has_failure} local_matched={local_matched}"
+            );
+        }
+        // Eligible empty next-command input still respects availability, warning, and skip gates.
+        let mut eligible = policy();
+        eligible.features.next_command = true;
+        assert_eq!(
+            decide(
+                &eligible,
+                Case {
+                    ai_available: false,
+                    ..base("")
+                },
+            ),
+            AiDecision::Skip
+        );
+        assert_eq!(
+            decide(
+                &eligible,
+                Case {
+                    warning: warn(),
+                    ..base("")
+                },
+            ),
+            AiDecision::Skip
+        );
+        assert_eq!(
+            decide(
+                &eligible,
+                Case {
+                    skip_ai: true,
+                    ..base("")
+                },
+            ),
+            AiDecision::NeedAiOnly
         );
     }
 }

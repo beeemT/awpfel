@@ -49,6 +49,22 @@ edits the line; it never runs it. Accepting a preview drops the
 Awpfel gray; accepted text keeps normal shell colors. Only `Ctrl-X A`
 replaces the line outside the ghost-text flow, and it never runs it.
 
+A fresh empty prompt shows a next-command suggestion. All AI features
+are on by default. This suggestion also requires `ai.enabled` and
+`ai.features.completion`. Set `ai.features.next_command = false` to
+turn it off. Clearing or deleting a line does not start a new
+prediction. If the model has no result, no ghost text shows.
+
+Pasted input uses the terminal's bracketed-paste support. Completion runs
+only when the cursor is at the end. Ghost text stays visible when a long
+command wraps. For normal multiline input, a suggestion can only append to
+the last line. All existing spaces, tabs and newlines stay unchanged. The
+explicit `# ` natural-language mode can still replace the whole query.
+
+Normal completion input is limited to 512 UTF-8 bytes. Longer input stays
+unchanged and has no completion. Awpfel never truncates pasted input or
+runs it.
+
 ## Natural language
 
 Type `#` plus a description. The built command appears as a
@@ -124,9 +140,25 @@ defaults. The defaults point at the managed local Apfel backend.
 enabled = true
 base_url = "http://127.0.0.1:11435/v1"
 model = "apple-foundationmodel"
+debounce_ms = 250
+
+[ai.features]
+error_recovery = true
+completion = true
+nl_generation = true
+next_command = true
 ```
 
+All AI features are on by default. Set one feature to `false` to turn
+it off. A suggestion after a failed command needs `error_recovery`.
 Set `ai.enabled = false` in the config file to turn AI off.
+
+Automatic suggestions wait 250 ms after the last edit or fresh prompt
+entry by default. This includes typed input, pasted input, next-command
+suggestions and `# ` previews. Set `AWPFEL_AI_DELAY` (seconds) to change
+the shell idle delay. `ai.debounce_ms` controls daemon request spacing.
+The explicit `Ctrl-X A` action keeps its 100 ms delay. Restart the daemon
+and open a new shell after you change the configuration.
 
 ## Safety
 

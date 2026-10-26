@@ -20,6 +20,16 @@
 _awpfel_accept_full() {
     local full="$_AWPFEL_SUGGESTION"
     [[ -n "$full" ]] || return 0
+    # Normal multiline BUFFER is append-only: the staged candidate must
+    # preserve every input byte as an exact prefix. A non-prefix full
+    # candidate (stale or foreign) is never accepted — drop the ghost
+    # and keep BUFFER/cursor untouched. "# " NL replacement is exempt.
+    if [[ "$BUFFER" == *$'\n'* && "$BUFFER" != "# "* && "$full" != "$BUFFER"* ]]; then
+        _awpfel_cancel_pending_ai
+        _awpfel_clear_ghost
+        zle -R 2>/dev/null
+        return 0
+    fi
     local had_multiline=0
     [[ "${POSTDISPLAY:-}" == *$'\n'* ]] && had_multiline=1
     _awpfel_cancel_pending_ai
@@ -105,6 +115,15 @@ _awpfel_accept_chunk() {
     local full="$_AWPFEL_SUGGESTION"
     local input="$BUFFER"
     [[ -n "$full" ]] || return 0
+    # Normal multiline BUFFER is append-only: a non-prefix full
+    # candidate must never clobber input. Drop the ghost, keep
+    # BUFFER/cursor, and never execute. "# " NL replacement is exempt.
+    if [[ "$input" == *$'\n'* && "$input" != "# "* && "$full" != "$input"* ]]; then
+        _awpfel_cancel_pending_ai
+        _awpfel_clear_ghost
+        zle -R 2>/dev/null
+        return 0
+    fi
     local had_multiline=0
     [[ "${POSTDISPLAY:-}" == *$'\n'* ]] && had_multiline=1
     _awpfel_cancel_pending_ai
@@ -182,7 +201,11 @@ _awpfel_backward_delete_char() {
     zle .backward-delete-char
     _awpfel_line_sync
     if [[ -z "$BUFFER" ]]; then
+        # Deleting to empty never initiates: clear owned ghost/hint and
+        # cancel any pending prediction instead.
+        _awpfel_clear_ghost
         _awpfel_clear_hint
+        _awpfel_cancel_pending_ai
         return
     fi
     _awpfel_suggest_local

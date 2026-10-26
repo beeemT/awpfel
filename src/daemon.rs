@@ -245,6 +245,7 @@ async fn handle_suggest(req: SuggestRequest, state: &Arc<Mutex<DaemonState>>) ->
             max_tokens: st.config.ai.max_tokens,
             timeout_ms: st.config.ai.timeout_ms,
             stderr_max_chars: st.config.context.stderr_max_chars,
+            error_recovery_enabled: st.config.ai.features.error_recovery,
         });
 
         let policy = AiTriggerPolicy::new(&st.config.ai);
@@ -414,6 +415,9 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> Response {
             ghost_text_color: state.config.ui.ghost_text_color,
             capture_stderr: state.config.context.capture_stderr,
             stderr_max_chars: state.config.context.stderr_max_chars,
+            next_command_enabled: state.config.ai.enabled
+                && state.config.ai.features.completion
+                && state.config.ai.features.next_command,
         }),
     })
 }

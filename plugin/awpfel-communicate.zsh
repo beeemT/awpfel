@@ -104,6 +104,9 @@ _awpfel_apply_suggest_response() {
 }
 
 _awpfel_suggest_local() {
+    # Empty BUFFER is context-only next-command owned solely by the
+    # line-init hook: typing/paste paths reaching here on an empty line
+    # must clear (never retrigger), and deleting-to-empty never initiates.
     if [[ -z "$BUFFER" || ! -S "$_AWPFEL_SOCKET" ]]; then
         _awpfel_clear_ghost
         _awpfel_clear_hint
@@ -232,10 +235,11 @@ _awpfel_schedule_async() {
     [[ -S "$_AWPFEL_SOCKET" ]] || return 1
     command -v socat &>/dev/null || return 1
 
+    # One automatic idle delay (default 0.25s, AWPFEL_AI_DELAY override)
+    # for suggest and nl_preview; only the explicit Ctrl-X A gesture
+    # stays fast at 0.1s.
     local delay="$_AWPFEL_AI_DELAY"
-    if [[ "$kind" == "nl_preview" ]]; then
-        delay=0.3
-    elif [[ "$kind" == "nl_apply" ]]; then
+    if [[ "$kind" == "nl_apply" ]]; then
         delay=0.1
     fi
 
@@ -293,8 +297,25 @@ _awpfel_schedule_async() {
     _AWPFEL_AI_LOADING=1
 }
 
+_awpfel_empty_suggest_allowed() {
+    (( _AWPFEL_NEXT_COMMAND_ENABLED )) || return 1
+    [[ -z "${BUFFER:-}" ]] || return 1
+    (( ${CURSOR:-0} == 0 )) || return 1
+    [[ -S "${_AWPFEL_SOCKET:-}" ]] || return 1
+    return 0
+}
+
 _awpfel_schedule_suggest() {
-    [[ ${#BUFFER} -ge 1 ]] || return 1
+    # Input bytes go over the wire exactly as typed (no trim, no CRLF
+    # normalization). The 512-byte input bound is enforced backend-side
+    # (rejected, never silently truncated); nothing is clipped here.
+    if [[ -z "${BUFFER:-}" ]]; then
+        # Empty input is context-only next-command: the composable
+        # line-init hook is its sole source. Typing/backspace/paste
+        # paths must never schedule from empty here (no retrigger on
+        # clearing, no initiation on deleting-to-empty).
+        _awpfel_empty_suggest_allowed || return 1
+    fi
     _awpfel_line_sync
     local request=$(_awpfel_build_request "$BUFFER" "$CURSOR" false)
     _awpfel_schedule_async suggest "$request" "$BUFFER"

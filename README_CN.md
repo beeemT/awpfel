@@ -48,6 +48,12 @@ Ghost text 有两种形式：
 接受的文本保留 shell 正常颜色。只有 `Ctrl-X A` 在 ghost 流程之外
 直接替换行内内容，它从不执行。
 
+新出现的空提示符显示下一条命令的建议。所有 AI 功能默认开启。该建议还需要启用 `ai.enabled` 和 `ai.features.completion`。设置 `ai.features.next_command = false` 可关闭它。清空或删除当前行不会触发新的预测。模型没有结果时，不显示 ghost text。
+
+粘贴输入使用终端的 bracketed-paste 支持，仅在光标位于输入末尾时请求补全。长命令自动换行后，ghost text 仍可见。普通多行输入的建议只能追加到最后一行，已有的空格、制表符和换行保持不变。显式的 `# ` 自然语言模式仍可替换整个查询。
+
+普通补全输入上限为 512 个 UTF-8 字节。超过上限时，输入保持不变且不提供补全。Awpfel 不会截断或执行粘贴内容。
+
 ## 自然语言
 
 输入 `#` 加一句描述。生成的命令以次行 ghost 预览显示
@@ -120,9 +126,18 @@ awpfel history import     # 导入 zsh 历史
 enabled = true
 base_url = "http://127.0.0.1:11435/v1"
 model = "apple-foundationmodel"
+debounce_ms = 250
+
+[ai.features]
+error_recovery = true
+completion = true
+nl_generation = true
+next_command = true
 ```
 
-把 `ai.enabled = false` 可关闭 AI。
+所有 AI 功能默认开启。把其中一项设为 `false` 可关闭它。上条命令失败后的建议需要 `error_recovery`。把 `ai.enabled = false` 可关闭 AI。
+
+自动建议默认在最后一次编辑或新提示符出现后等待 250 ms，适用于键入、粘贴、下一条命令建议和 `# ` 预览。可用 `AWPFEL_AI_DELAY`（秒）修改 shell 空闲延迟。`ai.debounce_ms` 控制 daemon 请求间隔。显式的 `Ctrl-X A` 操作仍保持 100 ms 延迟。修改配置后，请重启 daemon 并打开新 shell。
 
 ## 安全边界
 

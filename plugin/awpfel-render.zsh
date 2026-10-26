@@ -52,7 +52,16 @@ _awpfel_render_ghost() {
 
     _awpfel_hl_clear
 
-    if [[ -z "$full" || -z "$BUFFER" || "$full" == "$BUFFER" ]]; then
+    if [[ -z "$full" || "$full" == "$BUFFER" ]]; then
+        _AWPFEL_SUGGESTION=""
+        POSTDISPLAY=""
+        return
+    fi
+
+    # Normal multiline input never shows a replacement preview: only an
+    # exact-prefix suffix ghost preserves every input byte. "# " keeps
+    # the explicit arrow replacement preview below.
+    if [[ "$BUFFER" == *$'\n'* && "$BUFFER" != "# "* && "$full" != "$BUFFER"* ]]; then
         _AWPFEL_SUGGESTION=""
         POSTDISPLAY=""
         return
@@ -63,20 +72,32 @@ _awpfel_render_ghost() {
     if [[ "$full" == "$BUFFER"* ]]; then
         local ghost_part="${full#$BUFFER}"
         if [[ -n "$ghost_part" ]]; then
+            # Bounded native-wrap preview: show about one COLUMNS width
+            # of the suffix and let ZLE wrap it naturally (prompt width,
+            # wrapped input, tabs and wide chars need no math). The full
+            # candidate stays in _AWPFEL_SUGGESTION; only the display is
+            # truncated, always with a visible ellipsis. When nothing
+            # visible fits, drop the candidate so Tab can never accept
+            # an invisible ghost.
             local cols=${COLUMNS:-80}
-            local available=$(( cols - ${#BUFFER} - 2 ))
-            if (( available > 2 && ${#ghost_part} > available )); then
-                ghost_part="${ghost_part[1,$((available - 1))]}…"
-            elif (( available <= 2 )); then
-                ghost_part=""
+            local shown="$ghost_part"
+            if (( ${#shown} > cols )); then
+                if (( cols <= 1 )); then
+                    _AWPFEL_SUGGESTION=""
+                    POSTDISPLAY=""
+                    return
+                fi
+                shown="${shown[1,$((cols - 1))]}…"
             fi
-            if [[ -n "$ghost_part" ]]; then
-                POSTDISPLAY="$ghost_part"
-                _awpfel_hl_set_ghost "$#BUFFER $(( $#BUFFER + $#ghost_part )) $_AWPFEL_GHOST_STYLE"
+            if [[ -n "$shown" ]]; then
+                POSTDISPLAY="$shown"
+                _awpfel_hl_set_ghost "$#BUFFER $(( $#BUFFER + $#shown )) $_AWPFEL_GHOST_STYLE"
             else
+                _AWPFEL_SUGGESTION=""
                 POSTDISPLAY=""
             fi
         else
+            _AWPFEL_SUGGESTION=""
             POSTDISPLAY=""
         fi
     else
