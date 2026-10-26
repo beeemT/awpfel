@@ -1,6 +1,6 @@
 [package]
 name = "awpfel"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "On-device AI ghost text for zsh, backed by a managed local Apfel."
 license = "MIT"
