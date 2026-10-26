@@ -65,6 +65,9 @@ Normal completion input is limited to 512 UTF-8 bytes. Longer input stays
 unchanged and has no completion. Awpfel never truncates pasted input or
 runs it.
 
+Hints and warnings update only when their text changes.
+When a response has no hint or warning, Awpfel removes its old message.
+
 ## Natural language
 
 Type `#` plus a description. The built command appears as a
@@ -183,6 +186,9 @@ make sync             # Copy plugin only (no rebuild)
 make status           # Check daemon status
 make logs             # Show daemon logs
 ```
+
+The Rust suite includes native Zsh terminal checks.
+Install `zsh` and `jq` to run them.
 
 If a tag push misses the release, run the release again from main for that tag.
 

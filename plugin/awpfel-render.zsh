@@ -35,15 +35,23 @@ _awpfel_clear_ghost() {
 _awpfel_clear_hint() {
     _AWPFEL_HINT=""
     _AWPFEL_WARNING=""
-    zle -M "" 2>/dev/null
+    _awpfel_render_hint
 }
 
 _awpfel_render_hint() {
+    local message=""
     if [[ -n "$_AWPFEL_WARNING" ]]; then
-        zle -M "  ⚠ ${_AWPFEL_WARNING}" 2>/dev/null
+        message="  ⚠ ${_AWPFEL_WARNING}"
     elif [[ -n "$_AWPFEL_HINT" ]]; then
-        zle -M "  ⓘ ${_AWPFEL_HINT}" 2>/dev/null
+        message="  ⓘ ${_AWPFEL_HINT}"
     fi
+    if [[ "$message" == "${_AWPFEL_RENDERED_MESSAGE:-}" ]]; then
+        return 0
+    fi
+    if zle -M "$message" 2>/dev/null; then
+        _AWPFEL_RENDERED_MESSAGE="$message"
+    fi
+    return 0
 }
 
 # Render a FULL command suggestion for the current BUFFER.
