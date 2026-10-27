@@ -21,7 +21,6 @@ typeset -g _AWPFEL_BIN=""
 typeset -g _AWPFEL_LAST_STDERR_FILE="${TMPDIR:-/tmp}/awpfel-stderr-$$"
 typeset -g _AWPFEL_GHOST_STYLE="${AWPFEL_GHOST_STYLE:-fg=242}"
 typeset -g _AWPFEL_STDERR_MAX="${AWPFEL_STDERR_MAX_CHARS:-500}"
-typeset -ga _AWPFEL_HL_ENTRIES=()
 
 # Async state: exactly one in-flight completion. Each request carries its
 # kind (suggest / nl_preview / nl_apply) plus a snapshot of the BUFFER it

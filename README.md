@@ -45,9 +45,10 @@ Enter alone only runs what is in the line.
 
 Quoted text and escaped spaces stay one chunk. If the cursor sits
 mid-word, chunk accept completes that word first. Acceptance only
-edits the line; it never runs it. Accepting a preview drops the
-Awpfel gray; accepted text keeps normal shell colors. Only `Ctrl-X A`
-replaces the line outside the ghost-text flow, and it never runs it.
+edits the line; it never runs it. After full or partial acceptance,
+accepted text uses normal shell colors. Only the remaining suggestion
+keeps its ghost style. Only `Ctrl-X A` replaces the line outside the
+ghost-text flow, and it never runs it.
 
 A fresh empty prompt shows a next-command suggestion. All AI features
 are on by default. This suggestion also requires `ai.enabled` and

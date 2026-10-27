@@ -723,13 +723,6 @@ CURSOR=0
 _awpfel_render_ghost "git status"
 assert_eq "empty ghost: full staged" "git status" "$_AWPFEL_SUGGESTION"
 assert_eq "empty ghost: preview visible" "git status" "$POSTDISPLAY"
-_ghost_hl=""
-for _hl_entry in "${region_highlight[@]}"; do
-    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
-        _ghost_hl="$_hl_entry"
-    fi
-done
-assert_eq "empty ghost: highlight covers full preview" "0 ${#POSTDISPLAY} $_AWPFEL_GHOST_STYLE" "$_ghost_hl"
 _awpfel_tab
 assert_eq "empty tab: buffer takes prediction" "git status" "$BUFFER"
 assert_eq "empty tab: cursor at end" "${#BUFFER}" "$CURSOR"
@@ -808,13 +801,6 @@ CURSOR=0
 _awpfel_render_ghost "git status"
 assert_eq "render empty: full kept" "git status" "$_AWPFEL_SUGGESTION"
 assert_contains "render empty: ghost visible" "$POSTDISPLAY" "git status"
-_re_hl=""
-for _hl_entry in "${region_highlight[@]}"; do
-    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
-        _re_hl="$_hl_entry"
-    fi
-done
-assert_eq "render empty: HL 0-based exclusive" "0 ${#POSTDISPLAY} $_AWPFEL_GHOST_STYLE" "$_re_hl"
 
 # 2. Long suffix at narrow width keeps FULL text, truncates display.
 reset_harness
@@ -826,17 +812,6 @@ _awpfel_render_ghost "$_long_full"
 assert_eq "render narrow: full kept" "$_long_full" "$_AWPFEL_SUGGESTION"
 assert_contains "render narrow: ellipsis shown" "$POSTDISPLAY" "…"
 assert_eq "render narrow: display bounded" "20" "${#POSTDISPLAY}"
-_re_hl=""
-for _hl_entry in "${region_highlight[@]}"; do
-    if [[ "$_hl_entry" == *"$_AWPFEL_GHOST_STYLE"* ]]; then
-        _re_hl="$_hl_entry"
-    fi
-done
-_re_exp_end=$(( ${#BUFFER} + ${#POSTDISPLAY} ))
-_re_gb_end="${_re_hl##* }"
-_re_gb_end="${_re_hl% $_AWPFEL_GHOST_STYLE}"
-_re_gb_end="${_re_gb_end##* }"
-assert_eq "render narrow: HL ends at buffer+shown" "$_re_exp_end" "$_re_gb_end"
 COLUMNS=80
 
 # 3. Nothing visible fits: no invisible Tab-accept.

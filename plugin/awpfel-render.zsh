@@ -5,25 +5,19 @@
 # preview. BUFFER never mutates until accept.
 
 _awpfel_hl_clear() {
-    local entry
-    if (( ${+_AWPFEL_HL_ENTRIES} )) && (( ${#_AWPFEL_HL_ENTRIES} > 0 )); then
-        if (( ${+region_highlight} )); then
-            for entry in "${_AWPFEL_HL_ENTRIES[@]}"; do
-                region_highlight=("${(@)region_highlight:#$entry}")
-            done
-        fi
-        _AWPFEL_HL_ENTRIES=()
+    # Stable ownership: every Awpfel highlight carries the memo=awpfel
+    # tag, so ZLE-shifted entries stay removable after BUFFER edits.
+    if (( ${+region_highlight} )); then
+        region_highlight=("${(@)region_highlight:#* memo=awpfel}")
     fi
 }
 
 _awpfel_hl_add() {
-    region_highlight+=("$1")
-    _AWPFEL_HL_ENTRIES+=("$1")
+    region_highlight+=("$1 memo=awpfel")
 }
 
 _awpfel_hl_set_ghost() {
-    region_highlight+=("$1")
-    _AWPFEL_HL_ENTRIES+=("$1")
+    region_highlight+=("$1 memo=awpfel")
 }
 
 _awpfel_clear_ghost() {

@@ -15,7 +15,6 @@ source "$AWPFEL_PLUGIN_DIR/awpfel-communicate.zsh"
 _AWPFEL_HINT=''
 _AWPFEL_WARNING=''
 _AWPFEL_SUGGESTION=''
-_AWPFEL_HL_ENTRIES=()
 _AWPFEL_SOCKET="$HOME/absent.sock"
 KEYTIMEOUT=1
 bindkey -e
@@ -62,6 +61,52 @@ buffer=''
 vared -p 'PTY> ' -i _probe_ready buffer
 "#;
 
+// Accept-color probe: each typed key goes through real `zle .self-insert`
+// (native ZLE shifts highlight offsets) then production
+// `_awpfel_render_ghost` with the fixed full command. Tab / Shift-Tab go
+// through production `_awpfel_tab` / `_awpfel_accept_chunk`; the absent
+// socket ends the post-accept lookup without async. `__FULL__` is the
+// fixed candidate for the test.
+const ACCEPT_SCRIPT: &str = r#"
+_AWPFEL_PLUGIN_DIR="$AWPFEL_PLUGIN_DIR"
+eval "$(sed -e '/^awpfel_init$/d' -e '/^typeset -g _AWPFEL_PLUGIN_DIR=/d' "$AWPFEL_PLUGIN_DIR/awpfel.zsh")"
+_AWPFEL_GHOST_STYLE='fg=242'
+_AWPFEL_SOCKET="$HOME/absent.sock"
+_AWPFEL_FIXED_FULL="__FULL__"
+KEYTIMEOUT=1
+bindkey -e
+_probe_ready() {
+    zle -R
+    builtin printf '0\0\0' >&3
+}
+_probe_barrier() {
+    zle -R
+    builtin printf '%s\0%s\0' "$CURSOR" "$BUFFER" >&3
+}
+_probe_type() {
+    zle .self-insert
+    _awpfel_render_ghost "$_AWPFEL_FIXED_FULL"
+}
+_probe_foreign() {
+    region_highlight+=("0 3 fg=242 memo=awpfel-extra")
+}
+zle -N _probe_ready
+zle -N _probe_barrier
+zle -N _probe_type
+zle -N _probe_foreign
+zle -N _awpfel_tab
+zle -N _awpfel_accept_chunk
+for key in {a..z} ' '; do
+  bindkey -- "$key" _probe_type
+done
+bindkey '\t' _awpfel_tab
+bindkey '\e[Z' _awpfel_accept_chunk
+bindkey '^Xb' _probe_barrier
+bindkey '^Xf' _probe_foreign
+buffer=''
+vared -p 'PTY> ' -i _probe_ready buffer
+"#;
+
 struct Snapshot {
     buffer: String,
     cursor: usize,
@@ -79,6 +124,15 @@ struct ZleTerminal {
 
 impl ZleTerminal {
     fn start() -> Option<Self> {
+        Self::start_with(SCRIPT)
+    }
+
+    fn start_accept(full: &str) -> Option<Self> {
+        let script = ACCEPT_SCRIPT.replace("__FULL__", full);
+        Self::start_with(&script)
+    }
+
+    fn start_with(script_text: &str) -> Option<Self> {
         for program in ["zsh", "jq"] {
             match Command::new(program).arg("--version").output() {
                 Ok(output) => assert!(output.status.success(), "{program} is not usable"),
@@ -92,7 +146,7 @@ impl ZleTerminal {
 
         let home = tempfile::tempdir().unwrap();
         let script = home.path().join("probe.zsh");
-        std::fs::write(&script, SCRIPT).unwrap();
+        std::fs::write(&script, script_text).unwrap();
         let mut size = libc::winsize {
             ws_row: 24,
             ws_col: 80,
@@ -272,6 +326,31 @@ impl ZleTerminal {
         self.master.write_all(b"\x18b").unwrap();
         self.wait_snapshot()
     }
+
+    fn type_with_ack(&mut self, keys: &[u8]) -> Snapshot {
+        let mut snapshot = Snapshot {
+            buffer: String::new(),
+            cursor: 0,
+            row_moves: 0,
+        };
+        for key in keys {
+            snapshot = self.action(std::slice::from_ref(key));
+        }
+        snapshot
+    }
+
+    fn cell_fg(&self, row: u16, col: u16) -> vt100::Color {
+        self.parser
+            .screen()
+            .cell(row, col)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing cell {row},{col}:\n{}",
+                    self.parser.screen().contents()
+                )
+            })
+            .fgcolor()
+    }
 }
 
 impl Drop for ZleTerminal {
@@ -279,6 +358,126 @@ impl Drop for ZleTerminal {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn assert_cells(
+    terminal: &ZleTerminal,
+    row: u16,
+    col: u16,
+    len: u16,
+    expected: vt100::Color,
+    what: &str,
+) {
+    for i in 0..len {
+        let actual = terminal.cell_fg(row, col + i);
+        assert_eq!(
+            actual,
+            expected,
+            "{what} cell {row},{} must match, got {actual:?}:\n{}",
+            col + i,
+            terminal.parser.screen().contents()
+        );
+    }
+}
+
+#[test]
+fn native_zle_full_accept_repaints_normal_foreground() {
+    for typed in ["which", "which "] {
+        let Some(mut terminal) = ZleTerminal::start_accept("which omp") else {
+            return;
+        };
+        let row = terminal.parser.screen().cursor_position().0;
+        let before = terminal.type_with_ack(typed.as_bytes());
+        assert_eq!(before.buffer, typed);
+        assert_eq!(before.cursor, typed.len());
+        assert!(
+            terminal.parser.screen().contents().contains("which omp"),
+            "ghost must stage for {typed:?}:\n{}",
+            terminal.parser.screen().contents()
+        );
+        let accepted = terminal.action(b"\t");
+        assert_eq!(accepted.buffer, "which omp");
+        assert_eq!(accepted.cursor, 9);
+        assert_eq!(
+            accepted.row_moves, 0,
+            "single-line accept must not move below the line"
+        );
+        assert_cells(
+            &terminal,
+            row,
+            5,
+            9,
+            vt100::Color::Default,
+            "accepted `which omp`",
+        );
+    }
+}
+
+#[test]
+fn native_zle_chunk_accept_keeps_remainder_ghost() {
+    let Some(mut terminal) = ZleTerminal::start_accept("which omp --version") else {
+        return;
+    };
+    let row = terminal.parser.screen().cursor_position().0;
+    let typed = terminal.type_with_ack(b"which ");
+    assert_eq!(typed.buffer, "which ");
+    assert_eq!(typed.cursor, 6);
+    let chunked = terminal.action(b"\x1b[Z");
+    assert_eq!(chunked.buffer, "which omp ");
+    assert_eq!(chunked.cursor, 10);
+    assert_eq!(
+        chunked.row_moves, 0,
+        "single-line chunk accept must not move below the line"
+    );
+    assert_cells(
+        &terminal,
+        row,
+        5,
+        10,
+        vt100::Color::Default,
+        "accepted `which omp `",
+    );
+    assert_cells(
+        &terminal,
+        row,
+        15,
+        9,
+        vt100::Color::Idx(242),
+        "remainder `--version`",
+    );
+}
+
+#[test]
+fn native_zle_accept_preserves_foreign_highlight() {
+    let Some(mut terminal) = ZleTerminal::start_accept("which omp") else {
+        return;
+    };
+    let row = terminal.parser.screen().cursor_position().0;
+    let typed = terminal.type_with_ack(b"which");
+    assert_eq!(typed.buffer, "which");
+    assert_eq!(typed.cursor, 5);
+    let with_foreign = terminal.action(b"\x18f");
+    assert_eq!(with_foreign.buffer, "which");
+    assert_eq!(with_foreign.cursor, 5);
+    let accepted = terminal.action(b"\t");
+    assert_eq!(accepted.buffer, "which omp");
+    assert_eq!(accepted.cursor, 9);
+    assert_cells(
+        &terminal,
+        row,
+        5,
+        3,
+        vt100::Color::Idx(242),
+        "foreign `whi` range",
+    );
+    assert_cells(
+        &terminal,
+        row,
+        8,
+        6,
+        vt100::Color::Default,
+        "accepted `ch omp` range",
+    );
 }
 
 #[test]
